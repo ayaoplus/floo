@@ -836,8 +836,9 @@ async function runBatchSummaryReview(
       const { stdout } = await exec('git', ['diff', baseHead, 'HEAD'], { cwd: projectRoot });
       batchDiff = stdout.trim();
     } else {
-      // 新仓库：batch 开始时无 commit，用 diff-tree --root 获取所有变更
-      const { stdout } = await exec('git', ['diff-tree', '--no-commit-id', '-p', '--root', '-r', 'HEAD'], { cwd: projectRoot });
+      // 新仓库：batch 开始时无 commit，用空树 diff 获取从零开始的累计变更
+      const { stdout: emptyTree } = await exec('git', ['hash-object', '-t', 'tree', '/dev/null'], { cwd: projectRoot });
+      const { stdout } = await exec('git', ['diff', emptyTree.trim(), 'HEAD'], { cwd: projectRoot });
       batchDiff = stdout.trim();
     }
   } catch {
