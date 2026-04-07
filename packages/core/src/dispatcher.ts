@@ -11,6 +11,7 @@ import { promisify } from 'node:util';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
 import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
+import { notify } from './notifications.js';
 import type {
   Task,
   Batch,
@@ -476,6 +477,7 @@ export async function runTask(
       task.current_phase = phase;
       await saveTask(flooDir, task);
       await log(flooDir, 'failed', { task: task.id, phase, reason: 'max_retries_exceeded' });
+      await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', phase, reason: 'max_retries_exceeded' });
       return task;
     }
 
@@ -502,13 +504,16 @@ export async function runTask(
           task.status = 'failed';
           await saveTask(flooDir, task);
           await log(flooDir, 'failed', { task: task.id, reason: 'max_review_rounds', rounds: reviewRounds });
+          await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'max_review_rounds' });
           return task;
         }
         await log(flooDir, 'review-fail', { task: task.id, round: reviewRounds });
+        await notify(flooDir, 'review_concluded', { batch_id: task.batch_id, task_id: task.id, phase, verdict: 'fail', round: reviewRounds });
         phaseIdx = PHASE_ORDER.indexOf('coder');
         continue;
       }
       await log(flooDir, 'review-pass', { task: task.id });
+      await notify(flooDir, 'review_concluded', { batch_id: task.batch_id, task_id: task.id, phase, verdict: 'pass' });
     }
 
     if (phase === 'coder') {
@@ -552,6 +557,7 @@ export async function runTask(
   task.current_phase = null;
   await saveTask(flooDir, task);
   await log(flooDir, 'completed', { task: task.id });
+  await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'completed' });
 
   return task;
 }
@@ -621,6 +627,11 @@ async function executePhase(
     const sessionName = await adapter.spawn(spawnOpts);
     run.session_name = sessionName;
 
+    await notify(flooDir, 'phase_started', {
+      batch_id: task.batch_id, task_id: task.id, phase,
+      runtime: binding.runtime, model: binding.model, session: sessionName,
+    });
+
     await waitForCompletion(sessionName, flooDir, task.id, phase);
 
     const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
@@ -633,6 +644,11 @@ async function executePhase(
     await log(flooDir, 'callback', {
       task: task.id, phase, exit_code: exitArtifact.exit_code,
       duration: `${exitArtifact.duration_seconds}s`,
+    });
+
+    await notify(flooDir, 'phase_completed', {
+      batch_id: task.batch_id, task_id: task.id, phase,
+      exit_code: exitArtifact.exit_code, duration_seconds: exitArtifact.duration_seconds,
     });
 
     if (exitArtifact.exit_code === 0) {
@@ -650,6 +666,10 @@ async function executePhase(
       }
       await log(flooDir, 'retry', {
         task: task.id, phase, attempt: `${attempt}/${MAX_RETRIES}`,
+      });
+      await notify(flooDir, 'retry', {
+        batch_id: task.batch_id, task_id: task.id, phase,
+        attempt, max_retries: MAX_RETRIES, error: lastError.slice(0, 200),
       });
     }
   }
@@ -853,6 +873,8 @@ export async function createAndRun(
   };
   await saveTask(flooDir, mainTask);
 
+  await notify(flooDir, 'task_started', { batch_id: batchId, task_id: mainTask.id, description });
+
   // 如果从 coder 或 reviewer 开始，跳过 planner，直接单任务执行
   const startIdx = PHASE_ORDER.indexOf(startPhase);
   const coderIdx = PHASE_ORDER.indexOf('coder');
@@ -903,6 +925,10 @@ export async function createAndRun(
     const result = await runTask(task, 'coder', opts);
     batch.status = result.status === 'completed' ? 'completed' : 'active';
     await saveBatch(flooDir, batch);
+    await notify(flooDir, 'batch_completed', {
+      batch_id: batch.id, task_id: task.id,
+      status: batch.status, total_tasks: 1, completed: result.status === 'completed' ? 1 : 0, failed: result.status === 'failed' ? 1 : 0,
+    });
     return { batch, tasks: [result] };
   }
 
@@ -917,6 +943,13 @@ export async function createAndRun(
   const allCompleted = results.every(t => t.status === 'completed');
   batch.status = allCompleted ? 'completed' : 'active';
   await saveBatch(flooDir, batch);
+
+  await notify(flooDir, 'batch_completed', {
+    batch_id: batch.id, task_id: mainTask.id,
+    status: batch.status, total_tasks: results.length,
+    completed: results.filter(t => t.status === 'completed').length,
+    failed: results.filter(t => t.status === 'failed').length,
+  });
 
   return { batch, tasks: results };
 }
