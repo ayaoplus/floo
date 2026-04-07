@@ -32,8 +32,8 @@ export const monitorCommand = new Command('monitor')
 
     console.log(`监控模式启动，每 ${intervalSeconds} 秒刷新一次。按 Ctrl+C 退出。\n`);
 
-    // 记录上次 poll 时间，用于只显示新通知
-    let lastPollTime = new Date();
+    // 首屏显示所有已有通知（epoch 起始），之后只显示新通知
+    let lastPollTime = new Date(0);
 
     /** 格式化通知事件为可读文本 */
     function formatEvent(event: string, data: Record<string, unknown>): string {

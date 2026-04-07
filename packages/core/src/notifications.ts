@@ -8,10 +8,13 @@ import { readFile, writeFile, readdir, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { Notification, NotificationEvent, Phase } from './types.js';
 
+/** 单调递增计数器，保证同进程内同毫秒的通知有确定性排序 */
+let notifSeq = 0;
+
 /**
- * 生成通知 ID（用作文件名，保证时间排序 + 并行安全）
- * 格式：yyyyMMddTHHmmssSSS-{taskId}-{event}-{random}
- * 加 taskId 和随机后缀防止同一毫秒的并行任务覆盖
+ * 生成通知 ID（用作文件名，保证时间排序 + 写入顺序 + 并行安全）
+ * 格式：yyyyMMddTHHmmssSSS-{seq}-{taskId}-{event}-{random}
+ * seq 是进程内单调递增计数器，确保同毫秒通知按写入顺序排列
  */
 function generateId(event: NotificationEvent, taskId: string): string {
   const now = new Date();
@@ -19,8 +22,9 @@ function generateId(event: NotificationEvent, taskId: string): string {
     .replace(/[-:]/g, '')
     .replace('T', 'T')
     .replace(/\.\d+Z$/, now.getMilliseconds().toString().padStart(3, '0'));
+  const seq = String(notifSeq++).padStart(4, '0');
   const rand = Math.random().toString(36).slice(2, 6);
-  return `${ts}-${taskId}-${event}-${rand}`;
+  return `${ts}-${seq}-${taskId}-${event}-${rand}`;
 }
 
 /**
