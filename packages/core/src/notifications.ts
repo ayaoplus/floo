@@ -9,16 +9,18 @@ import { join } from 'node:path';
 import type { Notification, NotificationEvent, Phase } from './types.js';
 
 /**
- * 生成通知 ID（用作文件名，保证时间排序）
- * 格式：yyyyMMddTHHmmssSSS-{event}
+ * 生成通知 ID（用作文件名，保证时间排序 + 并行安全）
+ * 格式：yyyyMMddTHHmmssSSS-{taskId}-{event}-{random}
+ * 加 taskId 和随机后缀防止同一毫秒的并行任务覆盖
  */
-function generateId(event: NotificationEvent): string {
+function generateId(event: NotificationEvent, taskId: string): string {
   const now = new Date();
   const ts = now.toISOString()
     .replace(/[-:]/g, '')
     .replace('T', 'T')
     .replace(/\.\d+Z$/, now.getMilliseconds().toString().padStart(3, '0'));
-  return `${ts}-${event}`;
+  const rand = Math.random().toString(36).slice(2, 6);
+  return `${ts}-${taskId}-${event}-${rand}`;
 }
 
 /**
@@ -36,7 +38,7 @@ export async function notify(
   },
 ): Promise<void> {
   const { batch_id, task_id, phase, ...data } = fields;
-  const id = generateId(event);
+  const id = generateId(event, task_id);
 
   const notification: Notification = {
     id,

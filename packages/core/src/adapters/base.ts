@@ -161,7 +161,11 @@ if [ $EXIT_CODE -eq 0 ]; then
   done
   if [ -n "$FLOO_DIRTY" ]; then
     git add $FLOO_DIRTY
-    git commit -m "[floo] auto-commit uncommitted changes for ${taskId}" 2>/dev/null || true
+    # 不用 || true — hook 失败（如编译门禁）应传播为非零 exit code
+    if ! git commit -m "[floo] auto-commit uncommitted changes for ${taskId}" 2>&1; then
+      echo "[floo] force-commit failed (possibly compile gate rejection)"
+      EXIT_CODE=1
+    fi
   fi
 fi
 ` : '';

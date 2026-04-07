@@ -100,7 +100,7 @@ floo run "重构支付模块"
 | # | 文件 | 说明 |
 |---|------|------|
 | 5.1 | `packages/cli/src/commands/init.ts` | `floo init` 安装 post-commit git hook |
-| 5.2 | `templates/post-commit.sh` | hook 模板：`tsc --noEmit` 检查改动文件的新错误，失败 `git reset --soft HEAD~1`，通过则 push |
+| 5.2 | `templates/post-commit.sh` | hook 模板：`tsc --noEmit` 检查改动文件的新错误，失败 `git reset --soft HEAD~1`（不做 auto push，并行安全考虑） |
 | 5.3 | `packages/core/src/adapters/base.ts` | floo-runner 脚本加 force-commit：agent 退出后检查 `git status --porcelain`，scope 内未提交变更自动 `git add + commit` |
 
 ### Batch 5 完成标志
@@ -109,7 +109,7 @@ floo run "重构支付模块"
 # agent commit 后：
 # 1. post-commit hook 跑 tsc
 # 2. 编译失败 → git reset --soft（保留代码让 agent 继续修）
-# 3. 编译通过 → auto push
+# 3. 编译通过 → 继续（不自动 push，并行安全考虑）
 # agent 退出后：
 # 4. 有未提交的 scope 内文件 → 自动 commit
 ```
