@@ -205,5 +205,5 @@ export const DEFAULT_CONFIG: FlooConfig = {
     keep_on_failure_minutes: 1440, // 24h
     orphan_check_interval_minutes: 10,
   },
-  protected_files: ['.env', 'floo.config.yaml', 'CLAUDE.md', 'AGENTS.md'],
+  protected_files: ['.env', 'floo.config.json', 'CLAUDE.md', 'AGENTS.md'],
 };

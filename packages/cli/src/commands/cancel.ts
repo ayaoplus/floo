@@ -50,11 +50,17 @@ export const cancelCommand = new Command('cancel')
       process.exit(1);
     }
 
-    // 加载配置，确定该阶段使用哪个 runtime
+    // 加载配置（深度合并）
     let config: FlooConfig = DEFAULT_CONFIG;
     try {
       const configContent = await readFile(join(cwd, 'floo.config.json'), 'utf-8');
-      config = { ...DEFAULT_CONFIG, ...JSON.parse(configContent) };
+      const userConfig = JSON.parse(configContent);
+      config = {
+        roles: { ...DEFAULT_CONFIG.roles, ...userConfig.roles },
+        concurrency: { ...DEFAULT_CONFIG.concurrency, ...userConfig.concurrency },
+        session: { ...DEFAULT_CONFIG.session, ...userConfig.session },
+        protected_files: userConfig.protected_files ?? DEFAULT_CONFIG.protected_files,
+      };
     } catch { /* 使用默认配置 */ }
 
     const roleBinding = task.role_overrides?.[task.current_phase] ?? config.roles[task.current_phase];
