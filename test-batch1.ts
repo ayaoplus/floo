@@ -54,7 +54,7 @@ function assert(condition: boolean, msg: string) {
 
 console.log('\n=== 1. Types 导入 ===');
 
-assert(PHASE_ORDER.length === 4, 'PHASE_ORDER 有 4 个阶段');
+assert(PHASE_ORDER.length === 5, 'PHASE_ORDER 有 5 个阶段（含 tester）');
 assert(PHASE_ORDER[0] === 'designer', '第一个阶段是 designer');
 assert(MAX_RETRIES === 3, 'MAX_RETRIES = 3');
 assert(DEFAULT_CONFIG.roles.reviewer.runtime === 'codex', 'Reviewer 默认用 codex');

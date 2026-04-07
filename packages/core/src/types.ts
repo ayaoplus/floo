@@ -207,14 +207,17 @@ export interface AgentAdapter {
 // Dispatcher
 // ============================================================
 
-/** 状态机的阶段流转顺序（Milestone 1 不含 tester） */
-export const PHASE_ORDER: Phase[] = ['designer', 'planner', 'coder', 'reviewer'];
+/** 状态机的阶段流转顺序 */
+export const PHASE_ORDER: Phase[] = ['designer', 'planner', 'coder', 'reviewer', 'tester'];
 
 /** 最大重试次数 */
 export const MAX_RETRIES = 3;
 
 /** 最大 review 轮数（reviewer fail → coder → reviewer） */
 export const MAX_REVIEW_ROUNDS = 2;
+
+/** 最大测试轮数（tester fail → coder → reviewer → tester） */
+export const MAX_TEST_ROUNDS = 2;
 
 // ============================================================
 // 默认配置
