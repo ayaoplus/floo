@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
-import { ensureFlooDir, detectConflicts } from './scope.js';
+import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
 import type {
   Task,
   Batch,
@@ -475,20 +475,26 @@ export async function runTask(
 
     if (phase === 'coder') {
       const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
-      // 并行任务共享仓库，files_changed 是仓库级 diff（BASE_HEAD → CURRENT_HEAD），
-      // 会包含其他并行任务的变更。按 task scope 过滤，只保留本任务负责的文件。
+
+      // 1. Scope violation 检测：agent 是否修改了 scope 外的文件
+      const outOfScope = findOutOfScope(exitArtifact.files_changed, task.scope);
+      if (outOfScope.length > 0) {
+        // 只记日志，不自动扩展 scope——并行场景下 outOfScope 含其他任务的文件，扩展会污染
+        await log(flooDir, 'scope-violation', { task: task.id, files: outOfScope });
+      }
+
+      // 2. 过滤 exit artifact：只保留本任务 scope 内的文件，排除并行任务的噪声
+      //    写回 .exit 文件，确保下游消费者（reviewer diff 等）看到干净数据
+      const rawCount = exitArtifact.files_changed.length;
       const taskFiles = exitArtifact.files_changed.filter(
-        file => task.scope.some(s => {
-          const nf = file.replace(/\/+$/, '');
-          const ns = s.replace(/\/+$/, '');
-          return nf === ns || nf.startsWith(ns + '/') || ns.startsWith(nf + '/');
-        }),
+        file => findOutOfScope([file], task.scope).length === 0,
       );
-      if (taskFiles.length !== exitArtifact.files_changed.length) {
-        await log(flooDir, 'files-filtered', {
-          task: task.id,
-          raw: exitArtifact.files_changed.length,
-          filtered: taskFiles.length,
+      if (taskFiles.length !== rawCount) {
+        exitArtifact.files_changed = taskFiles;
+        const exitPath = join(flooDir, 'signals', `${task.id}-${phase}.exit`);
+        await writeFile(exitPath, JSON.stringify(exitArtifact, null, 2));
+        await log(flooDir, 'artifact-filtered', {
+          task: task.id, raw: rawCount, filtered: taskFiles.length,
         });
       }
     }
