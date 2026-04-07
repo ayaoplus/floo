@@ -79,7 +79,7 @@ async function collectChangedFiles(
     } else if (!baseHead && current) {
       // 新仓库：用 diff-tree 列出所有 committed 文件
       const { stdout } = await exec(
-        'git', ['diff-tree', '--no-commit-id', '--name-only', '-r', current], { cwd },
+        'git', ['diff-tree', '--no-commit-id', '--name-only', '--root', '-r', current], { cwd },
       );
       files.push(...stdout.split('\n'));
     }
@@ -176,7 +176,7 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
     FILES_CHANGED=$(git diff --name-only "$BASE_HEAD" "$CURRENT_HEAD" 2>/dev/null)
   elif [ -z "$BASE_HEAD" ] && [ -n "$CURRENT_HEAD" ]; then
     # 新仓库：BASE_HEAD 为空说明 agent 启动前没有 commit，用 diff-tree 列出所有文件
-    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r "$CURRENT_HEAD" 2>/dev/null)
+    FILES_CHANGED=$(git diff-tree --no-commit-id --name-only --root -r "$CURRENT_HEAD" 2>/dev/null)
   fi
 
   # 2. staged + unstaged changes
