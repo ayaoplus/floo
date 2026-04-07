@@ -14,158 +14,214 @@
 ## 开发原则
 
 1. **Claude 独占开发**：所有代码由 Claude 编写，避免多开发者上下文分裂
-2. **subagent 并行**：同一 batch 内无依赖的模块可用 subagent 并行开发（如 adapter 实现 + skill 模板）
-3. **串行优先**：有依赖关系的模块严格串行，types → adapter → scope → dispatcher
+2. **subagent 并行**：同一 batch 内无依赖的模块可用 subagent 并行开发
+3. **串行优先**：有依赖关系的模块严格串行
 4. **每个 batch 结束后 review**：Claude 开发完 → 提交 → Codex review → 人工确认 → 下一个 batch
 5. **原子提交**：每个模块一个 commit，commit message 说清楚干了什么
 
 ---
 
-## Batch 1：地基
+# Milestone 1：单任务全流程 ✅
 
-> 目标：类型系统 + 核心接口 + 基础设施。串行完成。
+> 已完成。`floo init → floo run → floo status` 全链路打通。
 
-| # | 文件 | 说明 | 完成标志 |
-|---|------|------|---------|
-| 1.1 | `packages/core/src/types.ts` | 所有类型定义：Task, Batch, Phase, RunRecord, ExitArtifact, Config 等 | tsc 编译通过 |
-| 1.2 | `packages/core/src/adapters/base.ts` | AgentAdapter 接口 + tmux 操作封装 + floo-runner 逻辑（spawn → 捕获退出码 → 写 exit artifact → 发 wait-for 信号） | 能启动 tmux session 跑 `echo hello`，检测完成，并读取 exit artifact |
-| 1.3 | `packages/core/src/scope.ts` | scope 冲突检测 + commit 锁（lockfile 实现） | 单元测试：scope 交叉检测、锁获取/释放 |
-| 1.4 | `packages/core/src/skills/loader.ts` | 加载 skill markdown + `{{var}}` 模板变量替换 | 能加载 skill 模板并替换变量输出完整 prompt |
+## Batch 1：地基 ✅
 
-### Batch 1 完成标志
+| # | 文件 | 状态 |
+|---|------|------|
+| 1.1 | `packages/core/src/types.ts` | ✅ |
+| 1.2 | `packages/core/src/adapters/base.ts` | ✅ |
+| 1.3 | `packages/core/src/scope.ts` | ✅ |
+| 1.4 | `packages/core/src/skills/loader.ts` | ✅ |
 
-```bash
-# 能跑通这个验证：
-# 1. import types, adapter, scope, loader 全部类型检查通过
-# 2. adapter.spawn() 启动 tmux session（通过 floo-runner 包装）
-# 3. adapter.isAlive() 返回 true
-# 4. session 结束后 .floo/signals/ 下有 exit artifact（含退出码）
-# 5. isAlive() 返回 false
-```
+## Batch 2：核心链路 ✅
 
-### Batch 1 Review
+| # | 文件 | 状态 |
+|---|------|------|
+| 2.1 | `packages/core/src/dispatcher.ts` | ✅ |
+| 2.2 | `packages/core/src/monitor.ts` | ✅ |
+| 2.3-2.4 | `adapters/claude.ts`, `adapters/codex.ts` | ✅ |
+| 2.5 | `packages/core/src/router.ts` | ✅ |
+| 2.6-2.9 | `skills/*.md` (4 个模板) | ✅ |
 
-提交后交 Codex 做首轮 review。重点：
-- `base.ts`：tmux 操作边界（spawn 失败、session name 冲突、floo-runner 信号可靠性）
-- `scope.ts`：commit 锁的 crash 安全性（进程崩溃后锁文件是否能正确清理）
+## Batch 3：CLI 集成 ✅
+
+| # | 文件 | 状态 |
+|---|------|------|
+| 3.1-3.6 | CLI 命令 (init/run/status/cancel/monitor) | ✅ |
+
+### M1 已知限制
+
+- 单任务独占仓库，不支持并行
+- Planner 输出用正则解析，不是完整 YAML 解析器
+- 无 force-commit 兜底（设计文档有，代码未实现）
+- 无 `--detach` 后台模式
+- skill 模板需要在实际使用中迭代调优
 
 ---
 
-## Batch 2：核心链路
+# Milestone 2：多任务并行 + 质量提升
 
-> 目标：dispatcher 驱动单任务跑完 designer → planner → coder → reviewer 全流程。
+> 目标：多任务并行调度，编译门禁，通知文件输出，后台模式。
 
-### 串行（有依赖）
+## Batch 4：多任务并行调度
+
+> 核心目标：Planner 拆出多任务后，scope 无交集的任务并行 dispatch。
 
 | # | 文件 | 说明 | 依赖 |
 |---|------|------|------|
-| 2.1 | `packages/core/src/dispatcher.ts` | 状态机 + on-complete 回调 + dispatch 下一阶段 | types, adapter, scope, loader |
-| 2.2 | `packages/core/src/monitor.ts` | tmux wait-for 监听 + 轮询外部状态 + 超时检测 | types, adapter（与 dispatcher 紧耦合）|
+| 4.1 | `packages/core/src/dispatcher.ts` | 扩展 `runTask` 为 `runBatch`：解析 plan.md 拆出多任务，scope 冲突检测，并行 dispatch 无冲突任务，串行 dispatch 有冲突任务 | scope.ts |
+| 4.2 | `packages/core/src/scope.ts` | commit 锁实际集成到 dispatcher 的 coder phase，序列化并发 commit | dispatcher |
+| 4.3 | `packages/core/src/types.ts` | 新增 `BatchTask`（批次内子任务）类型，区分于当前的单任务模型 | - |
+| 4.4 | `packages/core/src/monitor.ts` | 状态查询支持多任务视图，`floo status` 显示并行任务进度 | - |
 
-### 可并行（subagent）
-
-以下模块接口已定义、互不依赖，可用 subagent 并行开发：
-
-| # | 文件 | 说明 |
-|---|------|------|
-| 2.3 | `packages/core/src/adapters/claude.ts` | Claude Code adapter 实现 |
-| 2.4 | `packages/core/src/adapters/codex.ts` | Codex CLI adapter 实现 |
-| 2.5 | `packages/core/src/router.ts` | 任务自动路由（根据描述判断起始阶段） |
-| 2.6 | `skills/designer.md` | Designer skill 模板 |
-| 2.7 | `skills/planner.md` | Planner skill 模板（输出严格 YAML） |
-| 2.8 | `skills/coder.md` | Coder skill 模板 |
-| 2.9 | `skills/reviewer.md` | Reviewer skill 模板 |
-
-### 建议执行顺序
-
-1. 先用 subagent 并行写 2.3-2.5（adapter 实现 + router），同时主线程写 2.1 dispatcher
-2. dispatcher 完成后写 2.2 monitor
-3. skill 模板（2.6-2.9）可在任意时机用 subagent 并行写
-
-### Batch 2 完成标志
+### Batch 4 完成标志
 
 ```bash
-# 端到端验证：
-# 1. 手动组装 dispatcher + adapter + skill
-# 2. dispatcher.run("add a health check endpoint")
-# 3. 观察：designer session 启动 → 完成 → planner session 启动 → ... → reviewer 完成
-# 4. .floo/batches/ 下有完整的任务记录
+floo run "重构支付模块"
+# Planner 拆出 3 个子任务：T001 改 API, T002 改 DB, T003 改前端
+# T001 和 T003 scope 无交集 → 并行 dispatch
+# T002 和 T001 有交集 → T001 完成后再 dispatch T002
+# floo status 显示三个任务各自的进度
 ```
 
-### Batch 2 Review（最关键的一轮）
+### Batch 4 Review 重点
 
-提交后交 Codex 深度 review。**这是整个项目最重要的 review 节点。**
-
-| 模块 | Review 要点 |
-|------|------------|
-| `dispatcher.ts` | 状态转换是否完备、on-complete 是否处理所有 exit 情况、重试逻辑是否正确、最大重试次数是否生效 |
-| `monitor.ts` | wait-for 和轮询是否有竞态、超时处理是否安全、session 清理是否可靠 |
-
-轻 Review（确认接口调用正确即可）：
-- `claude.ts` / `codex.ts`：填充 base 接口，逻辑简单
-- `router.ts`：路由错了只是起点不对，不会崩
-- skill 模板：在实际使用中迭代
+- dispatcher 的并行/串行判断逻辑
+- commit 锁在实际并发场景下的可靠性
+- 任务依赖解锁的正确性
 
 ---
 
-## Batch 3：CLI 集成
+## Batch 5：编译门禁 + force-commit
 
-> 目标：`floo run "..."` 一条命令跑通全流程。
+> 核心目标：agent commit 后自动编译检查，失败 soft reset；agent 退出时兜底未提交的代码。
 
 | # | 文件 | 说明 |
 |---|------|------|
-| 3.1 | `packages/cli/src/index.ts` | CLI 入口（commander 注册命令） |
-| 3.2 | `packages/cli/src/commands/init.ts` | `floo init`：创建 .floo/ 目录 + 默认配置 |
-| 3.3 | `packages/cli/src/commands/run.ts` | `floo run "desc"`：创建任务 + clean check + 调用 dispatcher |
-| 3.4 | `packages/cli/src/commands/status.ts` | `floo status`：读 .floo/ 文件输出状态 |
-| 3.5 | `packages/cli/src/commands/cancel.ts` | `floo cancel <id>`：kill session + scope 内回滚 + 更新状态 |
-| 3.6 | `packages/cli/src/commands/monitor.ts` | `floo monitor`：持续监控输出 |
+| 5.1 | `packages/cli/src/commands/init.ts` | `floo init` 安装 post-commit git hook |
+| 5.2 | `templates/post-commit.sh` | hook 模板：`tsc --noEmit` 检查改动文件的新错误，失败 `git reset --soft HEAD~1`，通过则 push |
+| 5.3 | `packages/core/src/adapters/base.ts` | floo-runner 脚本加 force-commit：agent 退出后检查 `git status --porcelain`，scope 内未提交变更自动 `git add + commit` |
 
-CLI 命令都是胶水代码，可用 subagent 并行开发多个命令。
+### Batch 5 完成标志
+
+```bash
+# agent commit 后：
+# 1. post-commit hook 跑 tsc
+# 2. 编译失败 → git reset --soft（保留代码让 agent 继续修）
+# 3. 编译通过 → auto push
+# agent 退出后：
+# 4. 有未提交的 scope 内文件 → 自动 commit
+```
+
+---
+
+## Batch 6：后台模式 + 通知文件
+
+> 核心目标：`floo run --detach` 后台运行，关键节点写通知文件。
+
+| # | 文件 | 说明 |
+|---|------|------|
+| 6.1 | `packages/cli/src/commands/run.ts` | 加 `--detach` 选项：fork 子进程后立即返回 |
+| 6.2 | `packages/core/src/dispatcher.ts` | 在关键节点写通知文件到 `.floo/notifications/` |
+| 6.3 | `packages/core/src/notifications.ts` | 通知文件读写：结构化 JSON（事件类型、时间戳、任务 ID、阶段、结果摘要） |
+| 6.4 | `packages/cli/src/commands/monitor.ts` | 读取 notifications/ 实时显示，新通知高亮 |
+
+### 通知时间点
+
+| 事件 | 写入内容 |
+|------|---------|
+| 任务启动 | session 名、模型、任务描述 |
+| phase 完成 | 任务 ID、phase、exit_code、耗时 |
+| review 结论 | verdict、反馈摘要 |
+| 失败/重试 | 错误原因、当前 attempt |
+| 全部完成 | 整体结果、总耗时 |
+
+### 通知消费方式
+
+- **CLI 同步模式**：`floo run` 直接 stdout 打印进度，不需要读 notification 文件
+- **CLI 后台模式**：`floo run --detach` 后，用 `floo monitor` 读 notification 实时显示
+- **外部 agent 调用**（OpenClaw 等）：调用方自己读 `.floo/notifications/`，按自己的通道转发
+
+**Floo 不直接调用任何通知通道（Telegram/飞书/Slack），只写文件。调用方负责呈现。**
+
+---
+
+## Batch 7：Tester 角色 + 整体 Review
+
+> 核心目标：在 reviewer 之后加 tester 阶段，批次完成后做整体 review 报告。
+
+| # | 文件 | 说明 |
+|---|------|------|
+| 7.1 | `skills/tester.md` | Tester skill 模板（Playwright 规范：getByRole 定位、截图证据） |
+| 7.2 | `packages/core/src/types.ts` | PHASE_ORDER 加入 tester |
+| 7.3 | `packages/core/src/dispatcher.ts` | tester phase 逻辑：test fail → 回 coder |
+| 7.4 | `packages/cli/src/commands/init.ts` | `floo init --with-playwright` 可选安装 |
+| 7.5 | `packages/core/src/dispatcher.ts` | 批次完成后触发整体 review：只读报告，不修改代码 |
+
+---
+
+# Milestone 3：运维与进化
+
+> 目标：系统自我维护、经验积累、配置同步。
+
+## Batch 8：house-elf
 
 | # | 任务 | 说明 |
 |---|------|------|
-| 3.7 | 集成测试 | 端到端：init → run → status → 等待完成 → 验证产出文件 |
-| 3.8 | 错误路径测试 | 失败重试 + 取消 + 超时 |
+| 8.1 | lesson 记录 | 任务失败重试成功后，对比差异自动提取 lesson |
+| 8.2 | `floo learn "经验"` | 手动添加 lesson |
+| 8.3 | 规则提炼 | lesson 积累后归纳 → 写入 `.floo/context/project-rules.md` |
+| 8.4 | `floo sync` | 读 project-rules.md 生成 CLAUDE.md / AGENTS.md |
+| 8.5 | 健康检查 | orphan session 清理、stale task 检测、日志轮转 |
+| 8.6 | dispatch heartbeat | 每 5 分钟刷新 updated_at，health-check 15 分钟无更新报警 |
 
-### Batch 3 完成标志
+## Batch 9：Skill 模板迭代
 
-```bash
-cd some-test-project
-floo init
-floo run "add a health check endpoint"
-floo status  # 能看到任务进度
-# 等任务跑完，.floo/batches/ 下有完整记录
-```
-
-### Batch 3 Review
-
-轻 Review：CLI 是胶水层，确认参数解析和 core API 调用正确即可。
+| # | 任务 | 说明 |
+|---|------|------|
+| 9.1 | 模板迭代 | 根据实际跑通的经验调优 4 个 skill 模板 |
+| 9.2 | house-elf.md | 系统运维角色的 skill 模板 |
+| 9.3 | 项目级覆盖 | 支持目标项目自定义 skill 模板覆盖默认模板 |
 
 ---
 
-## 测试重点
+# Milestone 4：Web UI + 扩展
 
-### Batch 1 结束时必须验证
+> 目标：可视化监控面板，更多 runtime 支持。
 
-- [ ] tmux session spawn + floo-runner exit artifact 落盘
-- [ ] tmux session 异常退出时的检测
-- [ ] scope 交叉检测（有交集/无交集）
-- [ ] commit 锁获取、释放、crash 后恢复
-- [ ] skill 模板加载 + 变量替换
+## Batch 10：Web UI
 
-### Batch 2 结束时必须验证
+| # | 任务 | 说明 |
+|---|------|------|
+| 10.1 | `packages/web/` | Next.js 只读监控面板 |
+| 10.2 | 任务列表页 | 状态徽章、runtime 标签、耗时、批次分组 |
+| 10.3 | 任务详情页 | artifact 文件内容、run 历史、日志 |
+| 10.4 | `floo serve` | Hono HTTP server 读 .floo/ 返回 JSON |
 
-- [ ] 单任务全流程：designer → planner → coder → reviewer
-- [ ] 失败重试：coder 失败 → 带错误信息重试 → 成功
-- [ ] reviewer fail → 回 coder → 再 review（最多 2 轮）
-- [ ] 超时处理：session 超时 → 正确清理
-- [ ] 任务取消：cancel → session kill → 状态更新
+## Batch 11：扩展 Runtime
 
-### Batch 3 结束时必须验证
+| # | 任务 | 说明 |
+|---|------|------|
+| 11.1 | OpenClaw adapter | 第三个 runtime |
+| 11.2 | 自定义 adapter 机制 | 插件式注册新 runtime |
+| 11.3 | reasoning effort 配置 | Codex 的 medium/high/extra-high，重试时自动升级 |
 
-- [ ] `floo init` 在空项目和已有项目下都正常
-- [ ] `floo run` 拒绝 dirty working tree
-- [ ] `floo run` → 全流程跑通
-- [ ] `floo cancel` 只回滚 scope 内文件
-- [ ] `floo status` 输出准确反映实际状态
+---
+
+## 测试策略
+
+### 当前测试覆盖（44 cases）
+
+- Batch 1：types 导入、scope 冲突、commit 锁、skill 模板、tmux adapter
+- Batch 2：router 路由、adapter 导入、YAML 引号处理
+- Batch 3：手动验证 init → run → status 链路
+
+### M2 需要补充的测试
+
+- [ ] 多任务并行 dispatch + scope 冲突检测
+- [ ] commit 锁并发场景
+- [ ] force-commit 兜底
+- [ ] post-commit hook 编译门禁（通过 + 失败两条路径）
+- [ ] `--detach` 后台模式 + notification 文件生成
+- [ ] cancel 在并行任务场景下的正确性
