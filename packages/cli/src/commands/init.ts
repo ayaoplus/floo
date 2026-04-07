@@ -33,7 +33,8 @@ function getFlooRoot(): string {
 
 export const initCommand = new Command('init')
   .description('初始化当前项目的 floo 配置')
-  .action(async () => {
+  .option('--with-playwright', '安装 Playwright 并配置 E2E 测试支持')
+  .action(async (options: { withPlaywright?: boolean }) => {
     const cwd = process.cwd();
     const flooRoot = getFlooRoot();
 
@@ -134,6 +135,22 @@ export const initCommand = new Command('init')
       }
     } catch {
       console.log('  警告：无法安装 git hook（可能不是 git 仓库）');
+    }
+
+    // 6. 可选：安装 Playwright 并配置 E2E 测试
+    if (options.withPlaywright) {
+      console.log('\n安装 Playwright...');
+      const { execSync } = await import('node:child_process');
+      try {
+        execSync('npm install -D @playwright/test', { cwd, stdio: 'inherit' });
+        execSync('npx playwright install', { cwd, stdio: 'inherit' });
+        console.log('✓ Playwright 安装完成');
+        console.log('  提示：tester 角色将使用 Playwright 进行 E2E 测试');
+        console.log('  配置文件：playwright.config.ts（如需自定义请手动创建）');
+      } catch (err) {
+        console.log('  警告：Playwright 安装失败:', err instanceof Error ? err.message : err);
+        console.log('  你可以稍后手动运行：npm install -D @playwright/test && npx playwright install');
+      }
     }
 
     console.log('\nfloo 初始化完成。运行 `floo run "任务描述"` 开始。');
