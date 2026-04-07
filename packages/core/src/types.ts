@@ -69,7 +69,8 @@ export interface Task {
   current_phase: Phase | null;
   scope: string[];           // 允许修改的文件/目录列表
   acceptance_criteria: string[];
-  review_mode: 'auto' | 'human';
+  /** full=派 review agent, scan=自动检查 scope+exit, skip=仅验证 scope */
+  review_level: 'full' | 'scan' | 'skip';
   created_at: string;        // ISO 8601
   updated_at: string;
   /** 角色绑定覆盖（任务级 > 项目级 > 系统默认） */

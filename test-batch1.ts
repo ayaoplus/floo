@@ -68,7 +68,7 @@ const mockTask: Task = {
   current_phase: null,
   scope: ['src/api/'],
   acceptance_criteria: ['works'],
-  review_mode: 'auto',
+  review_level: 'full',
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
 };

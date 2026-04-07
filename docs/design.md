@@ -157,16 +157,18 @@ tmux new-session -d -s "floo-{taskId}-{phase}" \
 
 ### 2. floo-runner（agent 生命周期包装器）
 
-每个 agent 进程都由 `floo-runner` 包装，负责三件事：
+每个 agent 进程都由 `floo-runner` 包装，负责四件事：
 
 1. **启动 agent 进程**，捕获退出码
-2. **写 exit artifact**：`.floo/signals/{taskId}-{phase}.exit`（退出码 + 产物清单 + 时间戳 + git diff summary）
-3. **发 tmux wait-for 信号**：`tmux wait-for -S floo-{taskId}-{phase}-done`
+2. **force-commit 兜底**：agent 退出后检查 `git status --porcelain`，scope 内有未提交变更则自动 `git add + commit`，防止 agent 写了代码忘提交
+3. **写 exit artifact**：`.floo/signals/{taskId}-{phase}.exit`（退出码 + 产物清单 + 时间戳 + git diff summary）
+4. **发 tmux wait-for 信号**：`tmux wait-for -S floo-{taskId}-{phase}-done`
 
 ```bash
 # floo-runner 伪代码
 run_agent "$runtime" "$model" "$prompt"
 EXIT_CODE=$?
+force_commit_if_dirty "$SCOPE"    # 兜底：未提交的 scope 内变更自动 commit
 write_exit_artifact "$TASK_ID" "$PHASE" "$EXIT_CODE"
 tmux wait-for -S "floo-${TASK_ID}-${PHASE}-done"
 ```
@@ -286,15 +288,24 @@ acceptance_criteria:
 
 Reviewer 对着验收标准逐条检查，不做开放式评判。
 
-### 2. Review 模式
+### 2. Review 分级
+
+Planner 在拆任务时为每个任务标注 `review_level`，决定验证深度：
 
 ```yaml
-review_mode: auto | human
+review_level: full | scan | skip
 ```
 
-- 有 design.md → 默认 auto（pass 自动流转，fail 回 Coder）
-- 无 design.md → 默认 human（结果提交给人确认）
-- 可由用户显式覆盖
+| Level | 适用场景 | 处理流程 |
+|-------|---------|---------|
+| `full` | 核心逻辑、状态机、资金安全、并发控制 | 派 cross-review agent → 必须 pass |
+| `scan` | 集成代码、adapter 实现、中等复杂度 | dispatcher 自动检查 scope + exit code，不派 review agent |
+| `skip` | CLI 胶水、skill 模板、配置、低风险 | 仅验证 scope（`git diff --stat`），直接标完成 |
+
+**默认规则**：
+- 有 design.md + 验收标准 → 默认 `full`
+- 无 design.md → 默认 `scan`
+- 用户或 Planner 可显式覆盖
 
 ### 3. 防止 Review 循环
 
@@ -615,6 +626,8 @@ Tester skill 模板包含 Playwright 规范：
 - house-elf（lessons、配置同步、健康检查）
 - 通知系统
 - `floo learn` + `floo sync`
+- **post-commit 编译门禁**：`floo init` 安装 git hook，agent commit 时自动跑 `tsc --noEmit`，失败则 `git reset --soft` 让 agent 继续修
+- **dispatch heartbeat**：agent 运行期间每 5 分钟刷新 updated_at，health-check 15 分钟无更新报警
 
 ---
 
