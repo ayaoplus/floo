@@ -51,26 +51,54 @@ async function sendKeys(name: string, keys: string): Promise<void> {
  * 收集当前 repo 中所有变更文件（staged + unstaged + untracked）
  * kill() 调用时用，因为此时没有 BASE_HEAD 信息，只能看当前状态
  */
-async function collectChangedFiles(cwd: string): Promise<string[]> {
+/**
+ * 收集 agent 运行期间所有变更文件（committed + staged + unstaged + untracked）
+ * 读取 spawn 时保存的 base-head 文件来对比 committed changes
+ */
+async function collectChangedFiles(
+  cwd: string,
+  signalsDir: string,
+  taskId: string,
+  phase: string,
+): Promise<string[]> {
   const files: string[] = [];
 
-  // staged + unstaged（新仓库无 commit 时 HEAD 不存在，会失败，单独 catch）
+  // 读取 base HEAD
+  let baseHead = '';
+  try {
+    baseHead = (await readFile(join(signalsDir, `${taskId}-${phase}.base-head`), 'utf-8')).trim();
+  } catch { /* 文件可能不存在 */ }
+
+  // 1. committed changes：base HEAD → current HEAD
+  try {
+    const { stdout: currentHead } = await exec('git', ['rev-parse', 'HEAD'], { cwd });
+    const current = currentHead.trim();
+    if (baseHead && current && baseHead !== current) {
+      const { stdout } = await exec('git', ['diff', '--name-only', baseHead, current], { cwd });
+      files.push(...stdout.split('\n'));
+    } else if (!baseHead && current) {
+      // 新仓库：列出所有 committed 文件（对比空树）
+      const { stdout } = await exec(
+        'git', ['diff', '--name-only', '--diff-filter=A', '4b825dc642cb6eb9a060e54bf899d15f13a88f33', current], { cwd },
+      );
+      files.push(...stdout.split('\n'));
+    }
+  } catch { /* ignore */ }
+
+  // 2. staged + unstaged
   try {
     const { stdout } = await exec('git', ['diff', '--name-only', 'HEAD'], { cwd });
     files.push(...stdout.split('\n'));
   } catch {
-    // 无 HEAD（新仓库），尝试列出 staged 文件
     try {
       const { stdout } = await exec('git', ['diff', '--name-only', '--cached'], { cwd });
       files.push(...stdout.split('\n'));
     } catch { /* ignore */ }
   }
 
-  // untracked 文件（独立获取，不受 HEAD 影响）
+  // 3. untracked
   try {
-    const { stdout } = await exec(
-      'git', ['ls-files', '--others', '--exclude-standard'], { cwd },
-    );
+    const { stdout } = await exec('git', ['ls-files', '--others', '--exclude-standard'], { cwd });
     files.push(...stdout.split('\n'));
   } catch { /* ignore */ }
 
@@ -114,12 +142,17 @@ function buildRunnerScript(opts: {
   const { agentCommand, sessionName, taskId, phase, cwd, signalsDir } = opts;
   const exitFile = join(signalsDir, `${taskId}-${phase}.exit`);
 
+  const baseHeadFile = join(signalsDir, `${taskId}-${phase}.base-head`);
+
   return `#!/bin/bash
 set -e
 cd '${cwd}'
 
-# 记录启动前的 HEAD，用于后续 diff 比较
-BASE_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+# 读取 spawn 时保存的 BASE_HEAD（由 Node 层写入）
+BASE_HEAD=""
+if [ -f '${baseHeadFile}' ]; then
+  BASE_HEAD=$(cat '${baseHeadFile}')
+fi
 
 # 运行 agent，捕获退出码（不要因为 agent 失败就中断脚本）
 START_TIME=$(date -u +%s)
@@ -136,11 +169,16 @@ FINISHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 FILES_JSON="[]"
 if git rev-parse --git-dir > /dev/null 2>&1; then
   FILES_CHANGED=""
-  # 1. 对比 base HEAD 到当前 HEAD 的 committed changes
   CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+
+  # 1. committed changes：对比 base → current HEAD
   if [ -n "$BASE_HEAD" ] && [ -n "$CURRENT_HEAD" ] && [ "$BASE_HEAD" != "$CURRENT_HEAD" ]; then
     FILES_CHANGED=$(git diff --name-only "$BASE_HEAD" "$CURRENT_HEAD" 2>/dev/null)
+  elif [ -z "$BASE_HEAD" ] && [ -n "$CURRENT_HEAD" ]; then
+    # 新仓库：BASE_HEAD 为空说明 agent 启动前没有 commit，列出所有 committed 文件
+    FILES_CHANGED=$(git diff --name-only --diff-filter=A 4b825dc642cb6eb9a060e54bf899d15f13a88f33 "$CURRENT_HEAD" 2>/dev/null)
   fi
+
   # 2. staged + unstaged changes
   WORKING_CHANGES=$(git diff --name-only HEAD 2>/dev/null)
   # 3. untracked files
@@ -193,11 +231,19 @@ export abstract class BaseAdapter implements AgentAdapter {
     // 确保 signals 目录存在
     await mkdir(signalsDir, { recursive: true });
 
-    // 清理旧的 exit artifact 和脚本，防止重试时读到 stale 数据
-    const exitFile = join(signalsDir, `${opts.taskId}-${opts.phase}.exit`);
-    const oldScript = join(signalsDir, `${opts.taskId}-${opts.phase}.sh`);
-    await safeUnlink(exitFile);
-    await safeUnlink(oldScript);
+    // 清理旧的 artifact 和脚本，防止重试时读到 stale 数据
+    const prefix = `${opts.taskId}-${opts.phase}`;
+    await safeUnlink(join(signalsDir, `${prefix}.exit`));
+    await safeUnlink(join(signalsDir, `${prefix}.sh`));
+    await safeUnlink(join(signalsDir, `${prefix}.base-head`));
+
+    // 保存当前 HEAD 到文件，runner 脚本和 kill() 都用它来对比 committed changes
+    let baseHead = '';
+    try {
+      const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: opts.cwd });
+      baseHead = stdout.trim();
+    } catch { /* 新仓库无 HEAD，留空 */ }
+    await writeFile(join(signalsDir, `${prefix}.base-head`), baseHead);
 
     // 如果同名 session 已存在，先清理
     if (await sessionExists(sessionName)) {
@@ -250,10 +296,10 @@ export abstract class BaseAdapter implements AgentAdapter {
     await killSession(sessionName);
 
     // 收集 agent 被终止前已经产生的文件变更
-    const filesChanged = await collectChangedFiles(cwd);
+    const signalsDir = join(cwd, '.floo', 'signals');
+    const filesChanged = await collectChangedFiles(cwd, signalsDir, taskId, phase);
 
     // 主动写 exit artifact，标记为被终止（exit_code = -1）
-    const signalsDir = join(cwd, '.floo', 'signals');
     await mkdir(signalsDir, { recursive: true });
     const exitFile = join(signalsDir, `${taskId}-${phase}.exit`);
 
