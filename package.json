@@ -9,8 +9,13 @@
     "packages/cli",
     "packages/web"
   ],
+  "scripts": {
+    "test": "tsx test-batch1.ts",
+    "build": "tsc -b packages/core packages/cli"
+  },
   "devDependencies": {
     "@types/node": "^25.5.2",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

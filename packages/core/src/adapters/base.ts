@@ -47,6 +47,28 @@ async function sendKeys(name: string, keys: string): Promise<void> {
   await tmux('send-keys', '-t', name, keys, 'Enter');
 }
 
+/**
+ * 收集当前 repo 中所有变更文件（staged + unstaged + untracked）
+ * kill() 调用时用，因为此时没有 BASE_HEAD 信息，只能看当前状态
+ */
+async function collectChangedFiles(cwd: string): Promise<string[]> {
+  try {
+    // staged + unstaged
+    const { stdout: diffOut } = await exec('git', ['diff', '--name-only', 'HEAD'], { cwd });
+    // untracked
+    const { stdout: untrackedOut } = await exec(
+      'git', ['ls-files', '--others', '--exclude-standard'], { cwd },
+    );
+    const all = `${diffOut}\n${untrackedOut}`
+      .split('\n')
+      .map(f => f.trim())
+      .filter(f => f.length > 0);
+    return [...new Set(all)];
+  } catch {
+    return [];
+  }
+}
+
 /** 安全删除文件（不存在时不报错） */
 async function safeUnlink(filePath: string): Promise<void> {
   try {
@@ -219,6 +241,9 @@ export abstract class BaseAdapter implements AgentAdapter {
   async kill(sessionName: string, cwd: string, taskId: string, phase: string): Promise<void> {
     await killSession(sessionName);
 
+    // 收集 agent 被终止前已经产生的文件变更
+    const filesChanged = await collectChangedFiles(cwd);
+
     // 主动写 exit artifact，标记为被终止（exit_code = -1）
     const signalsDir = join(cwd, '.floo', 'signals');
     await mkdir(signalsDir, { recursive: true });
@@ -231,7 +256,7 @@ export abstract class BaseAdapter implements AgentAdapter {
       exit_code: -1,  // 特殊值：被外部终止
       finished_at: new Date().toISOString(),
       duration_seconds: -1,
-      files_changed: [],
+      files_changed: filesChanged,
     };
 
     await writeFile(exitFile, JSON.stringify(artifact, null, 2));

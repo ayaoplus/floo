@@ -475,11 +475,12 @@ concurrency:
   commit_lock: true
 
 # session 生命周期
+# session 生命周期（单位：分钟）
 session:
-  timeout: 30min
-  keep_on_success: 30min
-  keep_on_failure: 24h
-  orphan_check_interval: 10min
+  timeout_minutes: 30
+  keep_on_success_minutes: 30
+  keep_on_failure_minutes: 1440       # 24h
+  orphan_check_interval_minutes: 10
 
 # 保护机制（prompt 约束）
 protected_files:
