@@ -169,8 +169,8 @@ interface ParsedTask {
 function parsePlanTasks(content: string): ParsedTask[] {
   const tasks: ParsedTask[] = [];
 
-  // 尝试匹配多任务块：以 `- id:` 开头的 YAML 列表
-  const taskBlocks = content.split(/(?=^-\s+id:\s*)/m).filter(b => b.trim().length > 0);
+  // 尝试匹配多任务块：以 `- id:` 开头的 YAML 列表（支持缩进，如 `  - id:`）
+  const taskBlocks = content.split(/(?=^\s*-\s+id:\s*)/m).filter(b => b.trim().length > 0);
 
   for (const block of taskBlocks) {
     const idMatch = block.match(/id:\s*["']?([^\s"']+)["']?/);
@@ -251,6 +251,9 @@ async function consumePlannerOutput(
   const now = new Date().toISOString();
   const tasks: Task[] = [];
 
+  // 父任务的 artifact 目录（design.md / plan.md 存放位置）
+  const parentTaskDir = join(flooDir, 'batches', batch.id, 'tasks', parentTask.id);
+
   for (const p of parsed) {
     const task: Task = {
       id: p.id,
@@ -266,6 +269,15 @@ async function consumePlannerOutput(
       depends_on: p.depends_on,
     };
     await saveTask(flooDir, task);
+
+    // 将父任务的 design.md / plan.md 复制到子任务目录，确保 coder 能拿到上下文
+    const subTaskDir = join(flooDir, 'batches', batch.id, 'tasks', task.id);
+    for (const artifact of ['design.md', 'plan.md']) {
+      try {
+        await copyFile(join(parentTaskDir, artifact), join(subTaskDir, artifact));
+      } catch { /* artifact 可能不存在（如跳过了 designer） */ }
+    }
+
     tasks.push(task);
   }
 
@@ -614,7 +626,7 @@ async function runBatch(
   tasks: Task[],
   opts: DispatcherOptions,
 ): Promise<Task[]> {
-  const { projectRoot, adapters } = opts;
+  const { projectRoot } = opts;
   const config = opts.config ?? DEFAULT_CONFIG;
   const flooDir = await ensureFlooDir(projectRoot);
 
@@ -622,12 +634,18 @@ async function runBatch(
   const conflicts = detectConflicts(tasks.map(t => ({ id: t.id, scope: t.scope })));
   const conflictPairs = new Set(conflicts.flatMap(c => [`${c.task_a}:${c.task_b}`, `${c.task_b}:${c.task_a}`]));
 
-  const completed = new Set<string>();
+  const completed = new Set<string>();  // 成功完成的任务
+  const failed = new Set<string>();     // 失败的任务（区分于 completed）
   const results: Task[] = [];
 
-  /** 检查任务是否可以开始（依赖已完成 + 无 scope 冲突的 running 任务） */
+  /** 检查任务的依赖是否有失败的（失败传播） */
+  function hasDependencyFailed(task: Task): boolean {
+    return task.depends_on.some(dep => failed.has(dep));
+  }
+
+  /** 检查任务是否可以开始（依赖全部成功完成 + 无 scope 冲突的 running 任务） */
   function canStart(task: Task, running: Set<string>): boolean {
-    // 依赖检查
+    // 依赖检查：所有依赖必须在 completed（成功）集合中
     if (task.depends_on.some(dep => !completed.has(dep))) return false;
     // scope 冲突检查：不和任何 running 任务有冲突
     for (const rid of running) {
@@ -647,6 +665,19 @@ async function runBatch(
 
   // 调度循环：持续 dispatch 可启动的任务，等待完成的任务
   while (pending.size > 0 || running.size > 0) {
+    // 失败传播：依赖的任务已 failed，则当前任务也标记为 failed
+    for (const [id, task] of pending) {
+      if (hasDependencyFailed(task)) {
+        pending.delete(id);
+        task.status = 'failed';
+        task.current_phase = null;
+        await saveTask(flooDir, task);
+        failed.add(id);
+        results.push(task);
+        await log(flooDir, 'dependency-failed', { task: id, failed_deps: task.depends_on.filter(d => failed.has(d)) });
+      }
+    }
+
     // dispatch 所有可启动的任务
     const runningIds = new Set(running.keys());
     for (const [id, task] of pending) {
@@ -657,8 +688,24 @@ async function runBatch(
         await log(flooDir, 'parallel-dispatch', { task: id });
 
         // 从 coder 开始跑（designer/planner 已在 batch 级别完成）
-        const promise = runTask(task, 'coder', opts).then(result => {
-          completed.add(id);
+        // 用 commit lock 序列化 git 操作，防止并发 commit 损坏 index
+        const promise = (async () => {
+          if (config.concurrency.commit_lock) {
+            await acquireCommitLock(flooDir, id, `floo-${id}-coder`);
+          }
+          try {
+            return await runTask(task, 'coder', opts);
+          } finally {
+            if (config.concurrency.commit_lock) {
+              await releaseCommitLock(flooDir, id);
+            }
+          }
+        })().then(result => {
+          if (result.status === 'completed') {
+            completed.add(id);
+          } else {
+            failed.add(id);
+          }
           return result;
         });
         running.set(id, promise);
@@ -666,16 +713,18 @@ async function runBatch(
     }
 
     if (running.size === 0 && pending.size > 0) {
-      // 死锁检测：有待处理任务但没有能启动的
+      // 死锁检测：有待处理任务但全部被依赖阻塞（循环依赖）
+      // 不强制启动，标记所有 pending 任务为 failed
       await log(flooDir, 'deadlock', { pending: [...pending.keys()] });
-      // 强制启动第一个 pending 任务打破死锁
-      const [id, task] = [...pending.entries()][0];
-      pending.delete(id);
-      const promise = runTask(task, 'coder', opts).then(result => {
-        completed.add(id);
-        return result;
-      });
-      running.set(id, promise);
+      for (const [id, task] of pending) {
+        task.status = 'failed';
+        task.current_phase = null;
+        await saveTask(flooDir, task);
+        failed.add(id);
+        results.push(task);
+      }
+      pending.clear();
+      await log(flooDir, 'deadlock-resolved', { action: 'all_pending_failed' });
     }
 
     // 等待任意一个 running 任务完成
@@ -801,8 +850,9 @@ export async function createAndRun(
     return { batch, tasks: [result] };
   }
 
-  // 多任务：并行调度
-  mainTask.status = 'completed'; // 主任务完成（拆分完毕）
+  // 多任务：并行调度（父任务标记完成，清理 phase 避免 status 残留）
+  mainTask.status = 'completed';
+  mainTask.current_phase = null;
   await saveTask(flooDir, mainTask);
 
   const results = await runBatch(subTasks, opts);

@@ -206,7 +206,10 @@ export async function getStatusSummary(flooDir: string): Promise<string> {
     lines.push(`  描述: ${batch.description}`);
 
     const tasks = await listTasks(flooDir, batch.id);
+    // 只展示 batch.tasks 列表中的任务，避免显示已拆分的幽灵父任务
+    const activeTaskIds = new Set(batch.tasks);
     for (const task of tasks) {
+      if (!activeTaskIds.has(task.id)) continue;
       const phase = task.current_phase ? ` @ ${task.current_phase}` : '';
       lines.push(`  任务: ${task.id} [${task.status}${phase}]`);
       lines.push(`    ${task.description}`);

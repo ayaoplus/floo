@@ -8,6 +8,7 @@
 - **允许修改的文件**：{{task_scope}}
 - **验收标准**：{{acceptance_criteria}}
 - **设计方案**：{{design_doc}}
+- **实施计划**：{{plan_doc}}
 - **Review 反馈**（如有）：{{review_feedback}}
 
 ## 工作流程
