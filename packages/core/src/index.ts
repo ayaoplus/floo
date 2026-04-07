@@ -20,3 +20,25 @@ export {
 
 // Skill 模板加载
 export { loadSkill, renderTemplate, extractVariables } from './skills/loader.js';
+
+// Adapter 实现
+export { ClaudeAdapter } from './adapters/claude.js';
+export { CodexAdapter } from './adapters/codex.js';
+
+// Router
+export { routeTask } from './router.js';
+
+// Dispatcher
+export { runTask, createAndRun } from './dispatcher.js';
+
+// Monitor
+export {
+  getBatch,
+  getTask,
+  listBatches,
+  listTasks,
+  listRuns,
+  cancelTask,
+  checkTimeouts,
+  getStatusSummary,
+} from './monitor.js';
