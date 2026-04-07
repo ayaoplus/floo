@@ -90,12 +90,27 @@ function stripYamlQuotes(value: string): string {
 // Artifact 收集
 // ============================================================
 
-/** phase 对应的 artifact 文件名 */
-const PHASE_ARTIFACTS: Partial<Record<Phase, string>> = {
-  designer: 'design.md',
-  planner: 'plan.md',
-  reviewer: 'review.md',
+/** phase 对应的 artifact 基础名（不含 taskId 前缀） */
+const PHASE_ARTIFACT_BASES: Partial<Record<Phase, string>> = {
+  designer: 'design',
+  planner: 'plan',
+  reviewer: 'review',
 };
+
+/**
+ * 获取 projectRoot 中的 artifact 文件名（带 taskId 前缀，防止并行覆盖）
+ * 项目根目录用 `{taskId}-{base}.md`，任务目录中统一用 `{base}.md`
+ */
+function artifactFilename(phase: Phase, taskId: string): string | null {
+  const base = PHASE_ARTIFACT_BASES[phase];
+  return base ? `${taskId}-${base}.md` : null;
+}
+
+/** 任务目录中的 artifact 文件名（无前缀，始终固定） */
+function taskArtifactFilename(phase: Phase): string | null {
+  const base = PHASE_ARTIFACT_BASES[phase];
+  return base ? `${base}.md` : null;
+}
 
 /**
  * phase 完成后，将 agent 写在项目根目录的 artifact 复制到任务目录
@@ -107,21 +122,22 @@ async function collectArtifact(
   task: Task,
   phase: Phase,
 ): Promise<void> {
-  const filename = PHASE_ARTIFACTS[phase];
-  if (!filename) return;
+  const srcFilename = artifactFilename(phase, task.id);
+  const destFilename = taskArtifactFilename(phase);
+  if (!srcFilename || !destFilename) return;
 
-  const src = join(projectRoot, filename);
+  const src = join(projectRoot, srcFilename);
   const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
-  const dest = join(taskDir, filename);
+  const dest = join(taskDir, destFilename);
 
   try {
     await access(src);
     await mkdir(taskDir, { recursive: true });
     await copyFile(src, dest);
-    await log(flooDir, 'artifact-collected', { task: task.id, phase, file: filename });
+    await log(flooDir, 'artifact-collected', { task: task.id, phase, file: srcFilename });
   } catch {
     // artifact 可能不存在（如 agent 失败了没产出）
-    await log(flooDir, 'artifact-missing', { task: task.id, phase, file: filename });
+    await log(flooDir, 'artifact-missing', { task: task.id, phase, file: srcFilename });
   }
 }
 
@@ -129,8 +145,8 @@ async function collectArtifact(
  * 在 phase 执行前删除项目根目录的旧 artifact
  * 防止 agent 失败时 collectArtifact 复制到上一轮的陈旧文件
  */
-async function cleanStaleArtifact(projectRoot: string, phase: Phase): Promise<void> {
-  const filename = PHASE_ARTIFACTS[phase];
+async function cleanStaleArtifact(projectRoot: string, phase: Phase, taskId: string): Promise<void> {
+  const filename = artifactFilename(phase, taskId);
   if (!filename) return;
 
   const filePath = join(projectRoot, filename);
@@ -316,6 +332,8 @@ async function buildPrompt(
   const vars: TemplateVars = {
     description: task.description,
     task_scope: task.scope.join(', '),
+    // artifact 输出文件名（带 taskId 前缀，防止并行覆盖）
+    output_file: artifactFilename(phase, task.id) ?? '',
     acceptance_criteria: task.acceptance_criteria.join('\n- '),
     ...extraVars,
   };
@@ -351,22 +369,24 @@ async function buildPrompt(
   }
 
   if (phase === 'reviewer') {
-    // Fix #6: 用 base-head 文件获取完整 diff，而不是只看 HEAD~1
+    // 用 base-head 获取 coder 阶段的完整 diff
+    // 追加 '-- <scope>' 路径参数，并行场景下只看本任务的文件变更
+    const scopePaths = task.scope.length > 0 ? ['--', ...task.scope] : [];
     try {
       const signalsDir = join(flooDir, 'signals');
       const baseHead = (await readFile(join(signalsDir, `${task.id}-coder.base-head`), 'utf-8')).trim();
       if (baseHead) {
-        const { stdout } = await exec('git', ['diff', baseHead, 'HEAD'], { cwd: projectRoot });
+        const { stdout } = await exec('git', ['diff', baseHead, 'HEAD', ...scopePaths], { cwd: projectRoot });
         vars.diff = stdout.trim();
       } else {
         // 新仓库，用 diff-tree 列出所有文件
-        const { stdout } = await exec('git', ['diff-tree', '--no-commit-id', '-p', '--root', '-r', 'HEAD'], { cwd: projectRoot });
+        const { stdout } = await exec('git', ['diff-tree', '--no-commit-id', '-p', '--root', '-r', 'HEAD', ...scopePaths], { cwd: projectRoot });
         vars.diff = stdout.trim();
       }
     } catch {
       // fallback: 至少看最近一个 commit
       try {
-        const { stdout } = await exec('git', ['diff', 'HEAD~1'], { cwd: projectRoot });
+        const { stdout } = await exec('git', ['diff', 'HEAD~1', ...scopePaths], { cwd: projectRoot });
         vars.diff = stdout.trim();
       } catch {
         vars.diff = '(无法获取 diff)';
@@ -416,9 +436,27 @@ export async function runTask(
   while (phaseIdx < PHASE_ORDER.length) {
     const phase = PHASE_ORDER[phaseIdx];
 
-    // Fix #3: scan/skip 级别跳过 reviewer phase
-    if (phase === 'reviewer' && task.review_level !== 'full') {
-      await log(flooDir, 'skip-reviewer', { task: task.id, review_level: task.review_level });
+    // scan: 自动检查 exit code + scope 合规，不派 review agent
+    // skip: 仅跳过 reviewer，不做额外检查
+    if (phase === 'reviewer' && task.review_level === 'scan') {
+      // scan 级别：检查上一个 coder phase 的结果
+      const coderArtifact = await readExitArtifact(flooDir, task.id, 'coder');
+      if (coderArtifact.exit_code !== 0) {
+        task.status = 'failed';
+        await saveTask(flooDir, task);
+        await log(flooDir, 'scan-failed', { task: task.id, reason: 'coder_exit_nonzero', exit_code: coderArtifact.exit_code });
+        return task;
+      }
+      const outOfScope = findOutOfScope(coderArtifact.files_changed, task.scope);
+      if (outOfScope.length > 0) {
+        await log(flooDir, 'scan-scope-violation', { task: task.id, files: outOfScope });
+      }
+      await log(flooDir, 'scan-passed', { task: task.id });
+      phaseIdx++;
+      continue;
+    }
+    if (phase === 'reviewer' && task.review_level === 'skip') {
+      await log(flooDir, 'skip-reviewer', { task: task.id });
       phaseIdx++;
       continue;
     }
@@ -427,7 +465,7 @@ export async function runTask(
     await saveTask(flooDir, task);
 
     // 清理项目根目录的旧 artifact，防止 collectArtifact 吃到上一轮的陈旧产物
-    await cleanStaleArtifact(projectRoot, phase);
+    await cleanStaleArtifact(projectRoot, phase, task.id);
 
     // 执行当前 phase（含重试）
     runCounter++;
@@ -481,6 +519,14 @@ export async function runTask(
       if (outOfScope.length > 0) {
         // 只记日志，不自动扩展 scope——并行场景下 outOfScope 含其他任务的文件，扩展会污染
         await log(flooDir, 'scope-violation', { task: task.id, files: outOfScope });
+      }
+
+      // 2. Protected files 检测：agent 是否修改了受保护文件
+      const protectedHits = exitArtifact.files_changed.filter(
+        f => config.protected_files.some(p => f === p || f.endsWith('/' + p)),
+      );
+      if (protectedHits.length > 0) {
+        await log(flooDir, 'protected-file-violation', { task: task.id, files: protectedHits });
       }
 
       // 2. 过滤 exit artifact：只保留本任务 scope 内的文件，排除并行任务的噪声
@@ -824,7 +870,7 @@ export async function createAndRun(
   if (startPhase === 'designer') {
     mainTask.current_phase = 'designer';
     await saveTask(flooDir, mainTask);
-    await cleanStaleArtifact(projectRoot, 'designer');
+    await cleanStaleArtifact(projectRoot, 'designer', mainTask.id);
     const designResult = await executePhase(mainTask, 'designer', config, flooDir, projectRoot, adapters, 1);
     if (!designResult.success) {
       mainTask.status = 'failed';
@@ -837,7 +883,7 @@ export async function createAndRun(
   // 执行 planner
   mainTask.current_phase = 'planner';
   await saveTask(flooDir, mainTask);
-  await cleanStaleArtifact(projectRoot, 'planner');
+  await cleanStaleArtifact(projectRoot, 'planner', mainTask.id);
   const planResult = await executePhase(mainTask, 'planner', config, flooDir, projectRoot, adapters, 2);
   if (!planResult.success) {
     mainTask.status = 'failed';
