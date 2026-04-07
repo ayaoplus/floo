@@ -4,6 +4,7 @@
 
 Multi-Agent Vibe Coding Harness — 轻量多 agent 编排系统，面向个人开发者。
 设计文档: `docs/design.md` | 开发计划: `docs/dev-plan.md`
+远程仓库: `git@github.com:ayaoplus/floo.git` (private)
 
 ## 技术栈
 
@@ -43,6 +44,12 @@ feat(core): add scope conflict detection and commit lock
 fix(core): handle tmux server exit in waitForCompletion
 chore(config): initialize project structure and dependencies
 ```
+
+### 推送规则
+
+- 每次完成一个任务（batch 内的完整模块）后，commit 并 push 到 origin/main
+- 开发完代码按任务��度自动 commit + push，不需要额外确认
+- 禁止 force push
 
 ### 禁止
 
