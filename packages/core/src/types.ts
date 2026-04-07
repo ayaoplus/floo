@@ -150,6 +150,8 @@ export interface SpawnOptions {
   cwd: string;
   runtime: Runtime;
   model: string;
+  /** 启用 git 写操作序列化（runner 脚本注入 git wrapper） */
+  commitLock?: boolean;
 }
 
 /** adapter 接口——所有 runtime adapter 都要实现 */

@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
-import { findOutOfScope, ensureFlooDir, detectConflicts, acquireCommitLock, releaseCommitLock } from './scope.js';
+import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
 import type {
   Task,
   Batch,
@@ -550,27 +550,16 @@ async function executePhase(
       cwd: projectRoot,
       runtime: binding.runtime,
       model: binding.model,
+      // coder phase 通过 runner 脚本注入 git wrapper 序列化 git 写操作
+      commitLock: phase === 'coder' && config.concurrency.commit_lock,
     };
 
-    // coder phase 做 git add/commit，需要 commit lock 序列化防止 index 竞争
-    // 锁只包裹 agent 执行期间（spawn → waitForCompletion），不影响其他 phase
-    const needsLock = phase === 'coder' && config.concurrency.commit_lock;
-    if (needsLock) {
-      await acquireCommitLock(flooDir, task.id, `floo-${task.id}-${phase}`);
-    }
+    const sessionName = await adapter.spawn(spawnOpts);
+    run.session_name = sessionName;
 
-    let sessionName: string;
-    let exitArtifact: ExitArtifact;
-    try {
-      sessionName = await adapter.spawn(spawnOpts);
-      run.session_name = sessionName;
-      await waitForCompletion(sessionName, flooDir, task.id, phase);
-      exitArtifact = await readExitArtifact(flooDir, task.id, phase);
-    } finally {
-      if (needsLock) {
-        await releaseCommitLock(flooDir, task.id);
-      }
-    }
+    await waitForCompletion(sessionName, flooDir, task.id, phase);
+
+    const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
 
     run.finished_at = exitArtifact.finished_at;
     run.exit_code = exitArtifact.exit_code;

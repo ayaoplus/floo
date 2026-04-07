@@ -138,11 +138,39 @@ function buildRunnerScript(opts: {
   phase: string;
   cwd: string;
   signalsDir: string;
+  commitLock?: boolean;
 }): string {
-  const { agentCommand, sessionName, taskId, phase, cwd, signalsDir } = opts;
+  const { agentCommand, sessionName, taskId, phase, cwd, signalsDir, commitLock } = opts;
   const exitFile = join(signalsDir, `${taskId}-${phase}.exit`);
 
   const baseHeadFile = join(signalsDir, `${taskId}-${phase}.base-head`);
+
+  // git wrapper：拦截 agent 的 git 写操作（add/commit 等），通过 mkdir 锁序列化
+  // 读操作（diff/log/status）直接放行，不影响并行
+  const gitWrapperSetup = commitLock ? `
+# -- git wrapper: 序列化 git 写操作 --
+FLOO_REAL_GIT="$(command -v git)"
+FLOO_GIT_LOCK='${join(cwd, '.floo', '.git-lock')}'
+FLOO_WRAPPER_DIR=$(mktemp -d)
+cat > "$FLOO_WRAPPER_DIR/git" << 'FLOO_GIT_WRAPPER_EOF'
+#!/bin/bash
+case "$1" in
+  add|commit|merge|rebase|reset|stash|cherry-pick|rm|mv)
+    _w=0
+    while ! mkdir "$FLOO_GIT_LOCK" 2>/dev/null; do
+      sleep 0.5; _w=$((_w+1))
+      [ $_w -ge 600 ] && { echo "floo: git lock timeout (300s)" >&2; exit 128; }
+    done
+    "$FLOO_REAL_GIT" "$@"; _ec=$?
+    rmdir "$FLOO_GIT_LOCK" 2>/dev/null
+    exit $_ec ;;
+  *) exec "$FLOO_REAL_GIT" "$@" ;;
+esac
+FLOO_GIT_WRAPPER_EOF
+chmod +x "$FLOO_WRAPPER_DIR/git"
+export PATH="$FLOO_WRAPPER_DIR:$PATH"
+export FLOO_REAL_GIT FLOO_GIT_LOCK
+` : '';
 
   return `#!/bin/bash
 set -e
@@ -153,7 +181,7 @@ BASE_HEAD=""
 if [ -f '${baseHeadFile}' ]; then
   BASE_HEAD=$(cat '${baseHeadFile}')
 fi
-
+${gitWrapperSetup}
 # 运行 agent，捕获退出码（不要因为 agent 失败就中断脚本）
 START_TIME=$(date -u +%s)
 set +e
@@ -259,6 +287,7 @@ export abstract class BaseAdapter implements AgentAdapter {
       phase: opts.phase,
       cwd: opts.cwd,
       signalsDir,
+      commitLock: opts.commitLock,
     });
 
     const scriptPath = join(signalsDir, `${opts.taskId}-${opts.phase}.sh`);
