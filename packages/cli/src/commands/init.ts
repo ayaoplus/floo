@@ -4,7 +4,7 @@
  */
 
 import { Command } from 'commander';
-import { writeFile, readFile, readdir, copyFile, mkdir, access } from 'node:fs/promises';
+import { writeFile, readFile, readdir, copyFile, mkdir, access, chmod } from 'node:fs/promises';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureFlooDir, DEFAULT_CONFIG } from '@floo/core';
@@ -84,6 +84,41 @@ export const initCommand = new Command('init')
       }
     } catch (err) {
       console.log('  警告：无法更新 .gitignore:', err instanceof Error ? err.message : err);
+    }
+
+    // 5. 安装 post-commit git hook（编译门禁）
+    const FLOO_HOOK_MARKER = 'FLOO_POST_COMMIT_HOOK';
+    try {
+      const gitHooksDir = join(cwd, '.git', 'hooks');
+      const hookDest = join(gitHooksDir, 'post-commit');
+      const hookSrc = join(flooRoot, 'templates', 'post-commit.sh');
+
+      let shouldInstall = false;
+      try {
+        const existing = await readFile(hookDest, 'utf-8');
+        if (existing.includes(FLOO_HOOK_MARKER)) {
+          // 是 floo 的 hook，覆盖更新
+          shouldInstall = true;
+        } else {
+          console.log('  .git/hooks/post-commit 已存在（非 floo），跳过');
+        }
+      } catch {
+        // 文件不存在，安装
+        shouldInstall = true;
+      }
+
+      if (shouldInstall) {
+        try {
+          await access(hookSrc);
+          await copyFile(hookSrc, hookDest);
+          await chmod(hookDest, 0o755);
+          console.log('✓ 安装 post-commit hook（编译门禁）');
+        } catch {
+          console.log('  警告：找不到 hook 模板，跳过安装');
+        }
+      }
+    } catch {
+      console.log('  警告：无法安装 git hook（可能不是 git 仓库）');
     }
 
     console.log('\nfloo 初始化完成。运行 `floo run "任务描述"` 开始。');
