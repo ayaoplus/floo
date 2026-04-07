@@ -614,6 +614,8 @@ async function executePhase(
       model: binding.model,
       // coder phase 通过 runner 脚本注入 git wrapper 序列化 git 写操作
       commitLock: phase === 'coder' && config.concurrency.commit_lock,
+      // coder phase 传递 scope，用于 force-commit 兜底
+      scope: phase === 'coder' ? task.scope : undefined,
     };
 
     const sessionName = await adapter.spawn(spawnOpts);

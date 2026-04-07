@@ -152,6 +152,8 @@ export interface SpawnOptions {
   model: string;
   /** 启用 git 写操作序列化（runner 脚本注入 git wrapper） */
   commitLock?: boolean;
+  /** 任务允许修改的文件/目录列表（用于 force-commit 兜底） */
+  scope?: string[];
 }
 
 /** adapter 接口——所有 runtime adapter 都要实现 */

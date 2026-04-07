@@ -139,11 +139,32 @@ function buildRunnerScript(opts: {
   cwd: string;
   signalsDir: string;
   commitLock?: boolean;
+  scope?: string[];
 }): string {
-  const { agentCommand, sessionName, taskId, phase, cwd, signalsDir, commitLock } = opts;
+  const { agentCommand, sessionName, taskId, phase, cwd, signalsDir, commitLock, scope } = opts;
   const exitFile = join(signalsDir, `${taskId}-${phase}.exit`);
-
   const baseHeadFile = join(signalsDir, `${taskId}-${phase}.base-head`);
+
+  // force-commit 兜底：agent 退出后，scope 内未提交变更自动 commit
+  // 只在 coder phase + agent 成功退出时触发
+  const scopeFiles = (scope && scope.length > 0)
+    ? scope.map(s => `'${s.replace(/'/g, "'\\''")}'`).join(' ')
+    : '';
+  const forceCommitBlock = scopeFiles ? `
+# -- force-commit: scope 内未提交变更自动 commit --
+if [ $EXIT_CODE -eq 0 ]; then
+  FLOO_DIRTY=""
+  for _f in ${scopeFiles}; do
+    if git status --porcelain "$_f" 2>/dev/null | grep -q .; then
+      FLOO_DIRTY="$FLOO_DIRTY $_f"
+    fi
+  done
+  if [ -n "$FLOO_DIRTY" ]; then
+    git add $FLOO_DIRTY
+    git commit -m "[floo] auto-commit uncommitted changes for ${taskId}" 2>/dev/null || true
+  fi
+fi
+` : '';
 
   // git wrapper：拦截 agent 的 git 写操作（add/commit 等），通过 mkdir 锁序列化
   // 读操作（diff/log/status）直接放行，不影响并行
@@ -192,7 +213,7 @@ set -e
 END_TIME=$(date -u +%s)
 DURATION=$((END_TIME - START_TIME))
 FINISHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
+${forceCommitBlock}
 # 收集所有变更文件：committed + staged + unstaged + untracked
 FILES_JSON="[]"
 if git rev-parse --git-dir > /dev/null 2>&1; then
@@ -288,6 +309,7 @@ export abstract class BaseAdapter implements AgentAdapter {
       cwd: opts.cwd,
       signalsDir,
       commitLock: opts.commitLock,
+      scope: opts.scope,
     });
 
     const scriptPath = join(signalsDir, `${opts.taskId}-${opts.phase}.sh`);
