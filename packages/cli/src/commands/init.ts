@@ -5,13 +5,28 @@
 
 import { Command } from 'commander';
 import { writeFile, readFile, readdir, copyFile, mkdir, access, chmod } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureFlooDir, DEFAULT_CONFIG } from '@floo/core';
 
-/** 找到 floo 项目根目录（包含 skills/ 的目录） */
+/**
+ * 找到 floo 项目根目录（包含 skills/ 和 templates/ 的目录）
+ * 从当前文件位置向上遍历，兼容 dist/src/npx 等不同安装方式
+ */
 function getFlooRoot(): string {
-  // cli 的 dist 在 packages/cli/dist/，floo 根在 ../../..
+  let dir = dirname(fileURLToPath(import.meta.url));
+  // 最多向上查找 10 层
+  for (let i = 0; i < 10; i++) {
+    // floo 根目录的标志：同时包含 skills/ 和 packages/ 目录
+    if (existsSync(join(dir, 'skills')) && existsSync(join(dir, 'packages'))) {
+      return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break; // 到达文件系统根目录
+    dir = parent;
+  }
+  // fallback：用旧的相对路径推算
   const __dirname = dirname(fileURLToPath(import.meta.url));
   return join(__dirname, '..', '..', '..', '..');
 }

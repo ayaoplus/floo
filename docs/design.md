@@ -119,17 +119,17 @@ roles:
 ```
 .floo/batches/
 ├── 2026-04-07-auth-refactor/
-│   ├── batch.yaml              # 批次元数据
+│   ├── batch.json              # 批次元数据
 │   ├── tasks/
 │   │   ├── task-001/
-│   │   │   ├── task.yaml       # 任务元数据（状态、scope、runtime）
+│   │   │   ├── task.json       # 任务元数据（状态、scope、runtime）
 │   │   │   ├── design.md
 │   │   │   ├── plan.md
 │   │   │   ├── review.md
 │   │   │   ├── test-report.md
 │   │   │   └── runs/
-│   │   │       ├── 001-designer.yaml
-│   │   │       └── 002-coder.yaml
+│   │   │       ├── 001-designer.json
+│   │   │       └── 002-coder.json
 │   │   └── task-002/
 │   └── summary.md              # 整体 review 报告
 ```
@@ -278,7 +278,7 @@ router.ts 根据描述长度、关键词（bug/fix/refactor）、是否指定具
 
 ### 1. 验收标准驱动
 
-task.yaml 中定义验收标准（Designer 或用户定义）：
+task.json 中定义验收标准（Designer 或用户定义）：
 ```yaml
 acceptance_criteria:
   - /api/health 返回 { status: "ok", version: "1.0.0" }
@@ -351,7 +351,7 @@ review_level: full | scan | skip
 .floo/
 ├── batches/                          # 批次和任务数据（见上文）
 ├── sessions/
-│   └── {sessionName}.yaml            # tmux session 状态记录
+│   └── {sessionName}.json            # tmux session 状态记录
 ├── signals/
 │   └── {taskId}-{phase}.exit         # agent 完成信号
 ├── notifications/

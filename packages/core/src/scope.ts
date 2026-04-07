@@ -84,7 +84,10 @@ export function findOutOfScope(filesChanged: string[], allowedScope: string[]): 
 }
 
 // ============================================================
-// Commit 锁（文件锁实现）
+// Commit 锁（Node.js 文件锁实现）
+// 注意：dispatcher 当前不使用此锁，实际的 git 写操作序列化由
+// runner 脚本中的 mkdir 目录锁（.floo/.git-lock）完成。
+// 此 API 保留供外部消费者和测试使用。
 // ============================================================
 
 const LOCK_FILE = 'commit.lock';
