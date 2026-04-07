@@ -107,7 +107,7 @@ roles:
   tester:    { runtime: claude, model: sonnet }
 ```
 
-项目级覆盖：`floo.config.yaml` 中配置
+项目级覆盖：`floo.config.json` 中配置
 任务级覆盖：Planner 编排时动态指定，或用户显式指定
 
 **交叉审核规则**：Reviewer 默认使用与 Coder 不同的 runtime（建议，非强制）
@@ -344,7 +344,7 @@ review_level: full | scan | skip
 
 ### 全文件，不用 DB
 
-项目级配置文件 `floo.config.yaml` 放在项目根目录（用户可编辑，进 git）。
+项目级配置文件 `floo.config.json` 放在项目根目录（用户可编辑，进 git）。
 `.floo/` 下只放运行时数据，全部 gitignore。
 
 ```
@@ -469,7 +469,7 @@ lesson 积累到一定量 → house-elf 归纳提炼规则 → 写入 project-ru
 
 ## 十一、配置体系
 
-### floo.config.yaml
+### floo.config.json
 
 ```yaml
 # 角色绑定（项目级覆盖）
@@ -495,7 +495,7 @@ session:
 # 保护机制（prompt 约束）
 protected_files:
   - .env
-  - floo.config.yaml
+  - floo.config.json
   - CLAUDE.md
   - AGENTS.md
 ```
@@ -504,7 +504,7 @@ protected_files:
 
 **新项目**：
 1. 创建 `.floo/` 完整目录结构
-2. 生成 `floo.config.yaml` 默认配置
+2. 生成 `floo.config.json` 默认配置
 3. `.floo` 加入 `.gitignore`
 4. 检测有无 CLAUDE.md / AGENTS.md：无 → 从模板生成（含通用规范）；有 → 追加 floo section
 5. 扫描项目技术栈，记录到配置
@@ -580,7 +580,7 @@ Tester skill 模板包含 Playwright 规范：
 **Phase 1: 基础设施**
 1. `packages/core/src/types.ts` — 所有类型定义
 2. `packages/core/src/scope.ts` — scope 冲突检测 + commit 锁
-3. `floo.config.yaml` schema 定义
+3. `floo.config.json` schema 定义
 
 **Phase 2: Agent 适配器**
 4. `packages/core/src/adapters/base.ts` — 接口 + tmux 操作（spawn/isAlive/getOutput/sendMessage）
@@ -615,7 +615,7 @@ Tester skill 模板包含 Playwright 规范：
 - ❌ house-elf（lessons/sync 等）
 - ❌ OpenClaw adapter
 - ❌ 实时 WebSocket/SSE
-- ❌ Telegram 通知
+- ❌ 通知文件输出（.floo/notifications/，由调用方读取转发）
 - ❌ Token 消耗追踪
 
 ### Milestone 2 方向

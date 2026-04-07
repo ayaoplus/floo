@@ -35,7 +35,11 @@ export const runCommand = new Command('run')
         .filter(line => line.trim().length > 0)
         .filter(line => {
           const file = line.slice(3); // 去掉状态前缀如 "?? " 或 " M "
-          return !file.startsWith('.floo/') && file !== 'floo.config.json';
+          // 排除 floo 自身产生的文件
+          if (file === '.gitignore' || file === 'floo.config.json') return false;
+          if (file.startsWith('.floo/') || file === '.floo/') return false;
+          if (file.startsWith('skills/') || file === 'skills/') return false;
+          return true;
         });
       if (dirtyFiles.length > 0) {
         console.error('错误：working tree 不干净。请先 commit 或 stash 未提交的变更。');
