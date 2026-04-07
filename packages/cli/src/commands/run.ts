@@ -4,9 +4,10 @@
  */
 
 import { Command } from 'commander';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
+import { createWriteStream } from 'node:fs';
 import { join } from 'node:path';
 import {
   createAndRun,
@@ -25,7 +26,8 @@ export const runCommand = new Command('run')
   .argument('<description>', '任务描述')
   .option('--from <phase>', '指定起始阶段 (designer/planner/coder/reviewer)')
   .option('--scope <files...>', '指定文件 scope')
-  .action(async (description: string, options: { from?: string; scope?: string[] }) => {
+  .option('--detach', '后台运行，立即返回')
+  .action(async (description: string, options: { from?: string; scope?: string[]; detach?: boolean }) => {
     const cwd = process.cwd();
 
     // Milestone 1 强约束：working tree 必须干净（排除 floo 自身文件）
@@ -48,6 +50,29 @@ export const runCommand = new Command('run')
       }
     } catch {
       console.error('警告：无法检查 git 状态，可能不是 git 仓库。');
+    }
+
+    // --detach: 后台模式，spawn 子进程后立即返回
+    if (options.detach) {
+      const logsDir = join(cwd, '.floo', 'logs');
+      await mkdir(logsDir, { recursive: true });
+
+      // 重建命令参数：去掉 --detach，保留其他所有参数
+      const args = process.argv.slice(2).filter(a => a !== '--detach');
+      const logFile = join(logsDir, `run-${Date.now()}.log`);
+      const logStream = createWriteStream(logFile, { flags: 'a' });
+
+      const child = spawn(process.argv[0], args, {
+        detached: true,
+        stdio: ['ignore', logStream, logStream],
+        cwd,
+      });
+      child.unref();
+
+      console.log(`后台任务已启动 (PID: ${child.pid})`);
+      console.log(`日志: ${logFile}`);
+      console.log('执行 `floo monitor` 查看进度');
+      process.exit(0);
     }
 
     // 路由：决定从哪个 phase 开始
