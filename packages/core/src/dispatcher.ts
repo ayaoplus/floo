@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
-import { findOutOfScope, ensureFlooDir, detectConflicts, acquireCommitLock, releaseCommitLock } from './scope.js';
+import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
 import type {
   Task,
   Batch,
@@ -689,19 +689,8 @@ async function runBatch(
         await log(flooDir, 'parallel-dispatch', { task: id });
 
         // 从 coder 开始跑（designer/planner 已在 batch 级别完成）
-        // 用 commit lock 序列化 git 操作，防止并发 commit 损坏 index
-        const promise = (async () => {
-          if (config.concurrency.commit_lock) {
-            await acquireCommitLock(flooDir, id, `floo-${id}-coder`);
-          }
-          try {
-            return await runTask(task, 'coder', opts);
-          } finally {
-            if (config.concurrency.commit_lock) {
-              await releaseCommitLock(flooDir, id);
-            }
-          }
-        })().then(result => {
+        // 并行安全由 scope 冲突检测保证；commit lock 留给 floo-runner 层精确锁 git 操作
+        const promise = runTask(task, 'coder', opts).then(result => {
           if (result.status === 'completed') {
             completed.add(id);
           } else {
