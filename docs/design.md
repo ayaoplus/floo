@@ -177,16 +177,30 @@ tmux wait-for -S "floo-${TASK_ID}-${PHASE}-done"
 
 ### 3. 回调机制
 
-**核心用 `tmux wait-for` 做 agent 完成回调（零延迟）。**
+**核心用 `tmux wait-for` 做 agent 完成回调（零延迟），等价于 agent-swarm 的 `on-complete.sh`。**
+
+![Floo 事件驱动回调机制](./callback-mechanism.png)
+
+完整链路：
 
 ```
-Agent 退出 → floo-runner 写 exit artifact → tmux wait-for 信号触发
-  → dispatcher 读 exit artifact（退出码、产物、diff）
-  → 状态机判断下一步
-  → dispatch 下一个 agent 或暂停等人
+调用方 Agent → floo run "task" (阻塞等待)
+  → Dispatcher: createAndRun()
+    → adapter.spawn() → tmux new-session → Runner 脚本启动工作 Agent
+      → Agent 自主编码 + git commit (post-commit hook 编译门禁)
+      → Agent 退出
+    → Runner: force-commit 兜底 → 收集 files_changed → 写 exit artifact
+    → tmux wait-for 信号 ★ 零延迟事件回调（不是轮询）
+  → Dispatcher 读 exit artifact → 状态机推进 → dispatch 下一个 phase
+  → 所有 phase 完成 → 返回 { batch, tasks }
+→ CLI exit code + stdout ★ 同步模式下 CLI 本身就是回调
 ```
 
-**辅以轻量轮询（30-60s）检查外部状态**：CI 结果、PR checks 等。
+**两层回调**：
+- **内部回调**：`tmux wait-for` — dispatcher 在 agent 退出的瞬间被唤醒，零延迟推进状态机
+- **外部回调**：CLI exit — 调用方 agent（CC/Codex/OpenClaw）同步等待 CLI 完成，exit code 就是结果
+
+**不需要轮询，不需要 webhook。** 通知文件（`.floo/notifications/`）是给外部观察者（monitor/Telegram bot）用的补充机制。
 
 ### 4. tmux session 生命周期
 
