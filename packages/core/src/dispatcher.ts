@@ -27,6 +27,7 @@ import {
   PHASE_ORDER,
   MAX_RETRIES,
   MAX_REVIEW_ROUNDS,
+  MAX_TEST_ROUNDS,
   DEFAULT_CONFIG,
 } from './types.js';
 
@@ -94,6 +95,7 @@ const PHASE_ARTIFACT_BASES: Partial<Record<Phase, string>> = {
   designer: 'design',
   planner: 'plan',
   reviewer: 'review',
+  tester: 'test-report',
 };
 
 /**
@@ -347,7 +349,7 @@ async function buildPrompt(
   };
 
   // 按 phase 补充上下文
-  if (phase === 'planner' || phase === 'coder' || phase === 'reviewer') {
+  if (phase === 'planner' || phase === 'coder' || phase === 'reviewer' || phase === 'tester') {
     try {
       vars.design_doc = await readFile(join(taskDir, 'design.md'), 'utf-8');
     } catch { /* designer 可能被跳过 */ }
@@ -360,6 +362,10 @@ async function buildPrompt(
     try {
       vars.review_feedback = await readFile(join(taskDir, 'review.md'), 'utf-8');
     } catch { /* 首次执行没有 review */ }
+    // tester fail 后回到 coder，需要读取测试报告作为反馈
+    try {
+      vars.test_feedback = await readFile(join(taskDir, 'test-report.md'), 'utf-8');
+    } catch { /* 首次执行没有 test-report */ }
   }
 
   if (phase === 'planner') {
@@ -376,7 +382,7 @@ async function buildPrompt(
     }
   }
 
-  if (phase === 'reviewer') {
+  if (phase === 'reviewer' || phase === 'tester') {
     // 用 base-head 获取 coder 阶段的完整 diff
     // 追加 '-- <scope>' 路径参数，并行场景下只看本任务的文件变更
     const scopePaths = task.scope.length > 0 ? ['--', ...task.scope] : [];
@@ -400,6 +406,13 @@ async function buildPrompt(
         vars.diff = '(无法获取 diff)';
       }
     }
+  }
+
+  if (phase === 'tester') {
+    // tester 需要 review 反馈作为额外上下文（如果有的话）
+    try {
+      vars.review_feedback = await readFile(join(taskDir, 'review.md'), 'utf-8');
+    } catch { /* 可能没有 review */ }
   }
 
   return loadSkill(skillsDir, phase, vars);
@@ -438,6 +451,7 @@ export async function runTask(
   await log(flooDir, 'dispatch', { task: task.id, start_phase: startPhase });
 
   let reviewRounds = 0;
+  let testRounds = 0;
   let runCounter = 0;
 
   let phaseIdx = startIdx;
@@ -520,6 +534,28 @@ export async function runTask(
         continue;
       }
       await log(flooDir, 'review-pass', { task: task.id });
+      await notify(flooDir, 'review_concluded', { batch_id: task.batch_id, task_id: task.id, phase, verdict: 'pass' });
+    }
+
+    if (phase === 'tester') {
+      const testResult = await checkTestResult(flooDir, task);
+      if (testResult === 'fail') {
+        testRounds++;
+        if (testRounds >= MAX_TEST_ROUNDS) {
+          task.status = 'failed';
+          await saveTask(flooDir, task);
+          await log(flooDir, 'failed', { task: task.id, reason: 'max_test_rounds', rounds: testRounds });
+          await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'max_test_rounds' });
+          return task;
+        }
+        await log(flooDir, 'test-fail', { task: task.id, round: testRounds });
+        await notify(flooDir, 'review_concluded', { batch_id: task.batch_id, task_id: task.id, phase, verdict: 'fail', round: testRounds });
+        // tester fail → 回 coder 重新修复（coder 会读取 test-report.md 作为反馈）
+        reviewRounds = 0; // 重置 review 轮数，新一轮 coder→reviewer→tester
+        phaseIdx = PHASE_ORDER.indexOf('coder');
+        continue;
+      }
+      await log(flooDir, 'test-pass', { task: task.id });
       await notify(flooDir, 'review_concluded', { batch_id: task.batch_id, task_id: task.id, phase, verdict: 'pass' });
     }
 
@@ -704,6 +740,192 @@ async function checkReviewVerdict(
     return 'fail'; // 找不到 verdict，保守策略
   } catch {
     return 'fail'; // review.md 不存在
+  }
+}
+
+/**
+ * 检查测试结果
+ * 从 test-report.md 中提取 result: pass/fail
+ */
+async function checkTestResult(
+  flooDir: string,
+  task: Task,
+): Promise<'pass' | 'fail'> {
+  try {
+    const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
+    const testContent = await readFile(join(taskDir, 'test-report.md'), 'utf-8');
+
+    const match = testContent.match(/result:\s*(pass|fail)/i);
+    if (match) {
+      return match[1].toLowerCase() as 'pass' | 'fail';
+    }
+
+    return 'fail'; // 找不到 result，保守策略
+  } catch {
+    return 'fail'; // test-report.md 不存在
+  }
+}
+
+// ============================================================
+// 整体 Review（批次完成后只读报告）
+// ============================================================
+
+/**
+ * 批次完成后的整体 review
+ * 汇总所有已完成任务的变更，派 reviewer agent 生成 summary.md
+ * 只读报告，不修改代码——用户看完决定是否开新批次
+ */
+async function runBatchSummaryReview(
+  flooDir: string,
+  batch: Batch,
+  completedTasks: Task[],
+  config: FlooConfig,
+  projectRoot: string,
+  adapters: Record<string, AgentAdapter>,
+): Promise<void> {
+  await log(flooDir, 'summary-review-start', { batch: batch.id, tasks: completedTasks.length });
+
+  // 汇总所有任务的 review 和 test-report
+  const taskSummaries: string[] = [];
+  for (const task of completedTasks) {
+    const taskDir = join(flooDir, 'batches', batch.id, 'tasks', task.id);
+    let summary = `### ${task.id}: ${task.description}\n`;
+    summary += `- Scope: ${task.scope.join(', ') || '(未指定)'}\n`;
+
+    try {
+      const review = await readFile(join(taskDir, 'review.md'), 'utf-8');
+      summary += `- Review: ${review.match(/verdict:\s*(pass|fail)/i)?.[0] ?? '(无 verdict)'}\n`;
+    } catch { /* 无 review */ }
+
+    try {
+      const testReport = await readFile(join(taskDir, 'test-report.md'), 'utf-8');
+      summary += `- Test: ${testReport.match(/result:\s*(pass|fail)/i)?.[0] ?? '(无 result)'}\n`;
+    } catch { /* 无 test-report */ }
+
+    taskSummaries.push(summary);
+  }
+
+  // 获取整体 diff
+  let batchDiff = '';
+  try {
+    // 用第一个任务的 base-head 作为基准（所有任务共享同一个 batch 起点）
+    const firstTask = completedTasks[0];
+    const signalsDir = join(flooDir, 'signals');
+    const baseHead = (await readFile(join(signalsDir, `${firstTask.id}-coder.base-head`), 'utf-8')).trim();
+    if (baseHead) {
+      const { stdout } = await exec('git', ['diff', baseHead, 'HEAD'], { cwd: projectRoot });
+      batchDiff = stdout.trim();
+    }
+  } catch {
+    try {
+      const { stdout } = await exec('git', ['diff', 'HEAD~1'], { cwd: projectRoot });
+      batchDiff = stdout.trim();
+    } catch {
+      batchDiff = '(无法获取 diff)';
+    }
+  }
+
+  // 组装 summary review prompt
+  const summaryOutputFile = 'summary.md';
+  const prompt = `# 整体 Review — 批次总结报告
+
+你是 Reviewer 角色，负责对本批次的所有变更进行整体审查。**这是只读报告，不修改代码。**
+
+## 批次信息
+
+- **批次 ID**：${batch.id}
+- **描述**：${batch.description}
+- **完成任务数**：${completedTasks.length}
+
+## 各任务概况
+
+${taskSummaries.join('\n')}
+
+## 整体代码变更
+
+\`\`\`diff
+${batchDiff.slice(0, 50000)}
+\`\`\`
+
+## 输出要求
+
+将以下内容写入当前目录的 \`${batch.id}-summary.md\` 文件。
+
+### 格式
+
+\`\`\`markdown
+# 批次整体 Review
+
+## 概述
+（1-3 句话总结本批次的整体质量）
+
+## 各任务评估
+（逐个任务简要评价）
+
+## 跨任务问题
+（不同任务之间的一致性、接口兼容性、重复代码等）
+
+## 风险点
+（潜在的技术债务、性能风险、安全隐患）
+
+## 建议
+（后续改进方向，供用户决定是否开新批次）
+\`\`\`
+
+## 约束
+
+- **只读不改代码**，只输出报告
+- 报告要简洁有用，不做开放式评判
+- 聚焦跨任务的整体质量，不重复各任务 review 已覆盖的内容
+`;
+
+  // 用 reviewer 的 runtime 配置
+  const binding = config.roles.reviewer;
+  const adapter = adapters[binding.runtime];
+  if (!adapter) {
+    await log(flooDir, 'summary-review-skip', { reason: `no adapter for ${binding.runtime}` });
+    return;
+  }
+
+  // 创建一个虚拟任务用于 summary review
+  const summaryTask: Task = {
+    id: 'summary',
+    batch_id: batch.id,
+    description: `整体 Review: ${batch.description}`,
+    status: 'running',
+    current_phase: 'reviewer',
+    scope: [],
+    acceptance_criteria: [],
+    review_level: 'full',
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    depends_on: [],
+  };
+
+  const spawnOpts: SpawnOptions = {
+    taskId: summaryTask.id,
+    phase: 'reviewer',
+    prompt,
+    cwd: projectRoot,
+    runtime: binding.runtime,
+    model: binding.model,
+  };
+
+  try {
+    const sessionName = await adapter.spawn(spawnOpts);
+    await waitForCompletion(sessionName, flooDir, summaryTask.id, 'reviewer');
+
+    // 收集 summary artifact 到 batch 目录
+    const artifactSrc = join(projectRoot, `${batch.id}-summary.md`);
+    const artifactDest = join(flooDir, 'batches', batch.id, summaryOutputFile);
+    try {
+      await copyFile(artifactSrc, artifactDest);
+      await log(flooDir, 'summary-review-done', { batch: batch.id, file: summaryOutputFile });
+    } catch {
+      await log(flooDir, 'summary-review-artifact-missing', { batch: batch.id });
+    }
+  } catch (err) {
+    await log(flooDir, 'summary-review-failed', { batch: batch.id, error: String(err) });
   }
 }
 
@@ -932,11 +1154,17 @@ export async function createAndRun(
   const subTasks = await consumePlannerOutput(flooDir, batch, mainTask);
 
   if (subTasks.length <= 1) {
-    // 单任务：继续跑 coder → reviewer
+    // 单任务：继续跑 coder → reviewer → tester
     const task = subTasks[0] ?? mainTask;
     const result = await runTask(task, 'coder', opts);
     batch.status = result.status === 'completed' ? 'completed' : 'active';
     await saveBatch(flooDir, batch);
+
+    // 单任务完成后触发整体 review（只读报告）
+    if (result.status === 'completed') {
+      await runBatchSummaryReview(flooDir, batch, [result], config, projectRoot, adapters);
+    }
+
     await notify(flooDir, 'batch_completed', {
       batch_id: batch.id, task_id: task.id,
       status: batch.status, total_tasks: 1, completed: result.status === 'completed' ? 1 : 0, failed: result.status === 'failed' ? 1 : 0,
@@ -955,6 +1183,12 @@ export async function createAndRun(
   const allCompleted = results.every(t => t.status === 'completed');
   batch.status = allCompleted ? 'completed' : 'active';
   await saveBatch(flooDir, batch);
+
+  // 批次完成后触发整体 review（只读报告，不修改代码）
+  const completedTasks = results.filter(t => t.status === 'completed');
+  if (completedTasks.length > 0) {
+    await runBatchSummaryReview(flooDir, batch, completedTasks, config, projectRoot, adapters);
+  }
 
   await notify(flooDir, 'batch_completed', {
     batch_id: batch.id, task_id: mainTask.id,
