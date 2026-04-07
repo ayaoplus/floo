@@ -430,12 +430,14 @@ export interface DispatcherOptions {
 
 /**
  * 运行单个任务的完整生命周期
- * 从指定 phase 开始，驱动状态机流转直到完成或失败
+ * 从 startPhase 开始，驱动状态机流转到 endPhase（含）或失败
+ * endPhase 默认等于 PHASE_ORDER 最后一个阶段
  */
 export async function runTask(
   task: Task,
   startPhase: Phase,
   opts: DispatcherOptions,
+  endPhase?: Phase,
 ): Promise<Task> {
   const { projectRoot, adapters } = opts;
   const config = opts.config ?? DEFAULT_CONFIG;
@@ -445,6 +447,7 @@ export async function runTask(
   if (startIdx === -1) {
     throw new Error(`Invalid start phase: ${startPhase}`);
   }
+  const endIdx = endPhase ? PHASE_ORDER.indexOf(endPhase) : PHASE_ORDER.length - 1;
 
   task.status = 'running';
   await saveTask(flooDir, task);
@@ -455,7 +458,7 @@ export async function runTask(
   let runCounter = 0;
 
   let phaseIdx = startIdx;
-  while (phaseIdx < PHASE_ORDER.length) {
+  while (phaseIdx <= endIdx) {
     const phase = PHASE_ORDER[phaseIdx];
 
     // scan: 自动检查 exit code + scope 合规，不派 review agent
@@ -805,13 +808,11 @@ async function runBatchSummaryReview(
     taskSummaries.push(summary);
   }
 
-  // 获取整体 diff
+  // 获取整体 diff（用批次创建时的 base-head，不受 coder 重跑覆盖影响）
   let batchDiff = '';
   try {
-    // 用第一个任务的 base-head 作为基准（所有任务共享同一个 batch 起点）
-    const firstTask = completedTasks[0];
     const signalsDir = join(flooDir, 'signals');
-    const baseHead = (await readFile(join(signalsDir, `${firstTask.id}-coder.base-head`), 'utf-8')).trim();
+    const baseHead = (await readFile(join(signalsDir, `${batch.id}-batch.base-head`), 'utf-8')).trim();
     if (baseHead) {
       const { stdout } = await exec('git', ['diff', baseHead, 'HEAD'], { cwd: projectRoot });
       batchDiff = stdout.trim();
@@ -887,9 +888,10 @@ ${batchDiff.slice(0, 50000)}
     return;
   }
 
-  // 创建一个虚拟任务用于 summary review
+  // 创建一个虚拟任务用于 summary review（ID 含 batchId 避免并发 batch 冲突）
+  const summaryTaskId = `summary-${batch.id}`;
   const summaryTask: Task = {
-    id: 'summary',
+    id: summaryTaskId,
     batch_id: batch.id,
     description: `整体 Review: ${batch.description}`,
     status: 'running',
@@ -1104,13 +1106,31 @@ export async function createAndRun(
 
   await notify(flooDir, 'task_started', { batch_id: batchId, task_id: mainTask.id, description });
 
-  // 如果从 coder 或 reviewer 开始，跳过 planner，直接单任务执行
+  // 记录批次创建时的 HEAD，用于 summary review 的 diff 基线（不受 coder 重跑覆盖影响）
+  try {
+    const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: projectRoot });
+    const signalsDir = join(flooDir, 'signals');
+    await mkdir(signalsDir, { recursive: true });
+    await writeFile(join(signalsDir, `${batchId}-batch.base-head`), stdout.trim());
+  } catch { /* 新仓库无 HEAD，忽略 */ }
+
+  // 如果从 coder 或更后的 phase 开始，跳过 planner，直接单任务执行
+  // coder 开始 → 跑完整后续流程（coder→reviewer→tester）
+  // reviewer/tester 开始 → 只跑该单个 phase（不继续到后续 phase）
   const startIdx = PHASE_ORDER.indexOf(startPhase);
   const coderIdx = PHASE_ORDER.indexOf('coder');
   if (startIdx >= coderIdx) {
-    const result = await runTask(mainTask, startPhase, opts);
+    // reviewer/tester 是单 phase 任务，不跑后续；coder 跑完整后续
+    const endPhase = startPhase === 'coder' ? undefined : startPhase;
+    const result = await runTask(mainTask, startPhase, opts, endPhase);
     batch.status = result.status === 'completed' ? 'completed' : 'active';
     await saveBatch(flooDir, batch);
+
+    // 从 coder 走完整流程的任务也触发 summary review
+    if (result.status === 'completed' && startPhase === 'coder') {
+      await runBatchSummaryReview(flooDir, batch, [result], config, projectRoot, opts.adapters);
+    }
+
     await notify(flooDir, 'batch_completed', {
       batch_id: batchId, task_id: mainTask.id,
       status: batch.status, total_tasks: 1,
