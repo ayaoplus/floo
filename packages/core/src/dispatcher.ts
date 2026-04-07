@@ -4,8 +4,10 @@
  * 处理正常流转、失败重试、review 循环、超时取消
  */
 
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
 import { findOutOfScope, ensureFlooDir } from './scope.js';
@@ -26,6 +28,8 @@ import {
   DEFAULT_CONFIG,
 } from './types.js';
 
+const exec = promisify(execFile);
+
 // ============================================================
 // 日志
 // ============================================================
@@ -38,30 +42,20 @@ async function log(flooDir: string, module: string, fields: Record<string, unkno
 
   const logDir = join(flooDir, 'logs');
   await mkdir(logDir, { recursive: true });
-  const logFile = join(logDir, 'system.log');
-
-  // 追加写入
   const { appendFile } = await import('node:fs/promises');
-  await appendFile(logFile, line);
+  await appendFile(join(logDir, 'system.log'), line);
 }
 
 // ============================================================
 // 任务/批次持久化
 // ============================================================
 
-/** 持久化任务状态到 .floo/batches/{batchId}/tasks/{taskId}/task.yaml */
+/** 持久化任务状态 */
 async function saveTask(flooDir: string, task: Task): Promise<void> {
   const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
   await mkdir(taskDir, { recursive: true });
   task.updated_at = new Date().toISOString();
   await writeFile(join(taskDir, 'task.json'), JSON.stringify(task, null, 2));
-}
-
-/** 读取任务状态 */
-async function loadTask(flooDir: string, batchId: string, taskId: string): Promise<Task> {
-  const filePath = join(flooDir, 'batches', batchId, 'tasks', taskId, 'task.json');
-  const content = await readFile(filePath, 'utf-8');
-  return JSON.parse(content) as Task;
 }
 
 /** 持久化批次状态 */
@@ -72,18 +66,102 @@ async function saveBatch(flooDir: string, batch: Batch): Promise<void> {
   await writeFile(join(batchDir, 'batch.json'), JSON.stringify(batch, null, 2));
 }
 
-/** 保存 run 记录 */
+/** 保存 run 记录（runId 包含 attempt 防覆盖） */
 async function saveRun(flooDir: string, batchId: string, taskId: string, run: RunRecord): Promise<void> {
   const runsDir = join(flooDir, 'batches', batchId, 'tasks', taskId, 'runs');
   await mkdir(runsDir, { recursive: true });
   await writeFile(join(runsDir, `${run.id}.json`), JSON.stringify(run, null, 2));
 }
 
-/** 保存 artifact 文件（design.md, plan.md, review.md 等） */
-async function saveArtifact(flooDir: string, batchId: string, taskId: string, filename: string, content: string): Promise<void> {
-  const taskDir = join(flooDir, 'batches', batchId, 'tasks', taskId);
-  await mkdir(taskDir, { recursive: true });
-  await writeFile(join(taskDir, filename), content);
+// ============================================================
+// Artifact 收集
+// ============================================================
+
+/** phase 对应的 artifact 文件名 */
+const PHASE_ARTIFACTS: Partial<Record<Phase, string>> = {
+  designer: 'design.md',
+  planner: 'plan.md',
+  reviewer: 'review.md',
+};
+
+/**
+ * phase 完成后，将 agent 写在项目根目录的 artifact 复制到任务目录
+ * agent 在 projectRoot 下运行，产出写在 projectRoot；dispatcher 从任务目录读取
+ */
+async function collectArtifact(
+  projectRoot: string,
+  flooDir: string,
+  task: Task,
+  phase: Phase,
+): Promise<void> {
+  const filename = PHASE_ARTIFACTS[phase];
+  if (!filename) return;
+
+  const src = join(projectRoot, filename);
+  const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
+  const dest = join(taskDir, filename);
+
+  try {
+    await access(src);
+    await mkdir(taskDir, { recursive: true });
+    await copyFile(src, dest);
+    await log(flooDir, 'artifact-collected', { task: task.id, phase, file: filename });
+  } catch {
+    // artifact 可能不存在（如 agent 失败了没产出）
+    await log(flooDir, 'artifact-missing', { task: task.id, phase, file: filename });
+  }
+}
+
+/**
+ * Planner 完成后，解析 plan.md 中的 YAML 更新 task 的 scope、acceptance_criteria、review_level
+ */
+async function consumePlannerOutput(
+  flooDir: string,
+  task: Task,
+): Promise<void> {
+  const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
+  let content: string;
+  try {
+    content = await readFile(join(taskDir, 'plan.md'), 'utf-8');
+  } catch {
+    return; // plan.md 不存在，跳过
+  }
+
+  // 从 plan.md 提取 YAML 块中的 scope 和 acceptance_criteria
+  // 简单正则提取，不引入 YAML 解析器
+  const scopeMatches = content.matchAll(/scope:\s*\n((?:\s+-\s+.+\n?)+)/g);
+  const scopes: string[] = [];
+  for (const m of scopeMatches) {
+    const items = m[1].matchAll(/^\s+-\s+(.+)/gm);
+    for (const item of items) {
+      scopes.push(item[1].trim());
+    }
+  }
+  if (scopes.length > 0) {
+    task.scope = [...new Set([...task.scope, ...scopes])];
+  }
+
+  const criteriaMatch = content.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)+)/);
+  if (criteriaMatch) {
+    const items = criteriaMatch[1].matchAll(/^\s+-\s+(.+)/gm);
+    for (const item of items) {
+      task.acceptance_criteria.push(item[1].trim());
+    }
+  }
+
+  // 提取 review_level
+  const levelMatch = content.match(/review_level:\s*(full|scan|skip)/i);
+  if (levelMatch) {
+    task.review_level = levelMatch[1].toLowerCase() as Task['review_level'];
+  }
+
+  await saveTask(flooDir, task);
+  await log(flooDir, 'plan-consumed', {
+    task: task.id,
+    scope_count: task.scope.length,
+    criteria_count: task.acceptance_criteria.length,
+    review_level: task.review_level,
+  });
 }
 
 // ============================================================
@@ -123,19 +201,19 @@ async function buildPrompt(
     try {
       vars.plan_doc = await readFile(join(taskDir, 'plan.md'), 'utf-8');
     } catch { /* planner 可能被跳过 */ }
-    // 如果有前次 review 反馈
     try {
       vars.review_feedback = await readFile(join(taskDir, 'review.md'), 'utf-8');
     } catch { /* 首次执行没有 review */ }
   }
 
   if (phase === 'planner') {
-    // 注入项目目录结构
     try {
-      const { execFile } = await import('node:child_process');
-      const { promisify } = await import('node:util');
-      const exec = promisify(execFile);
-      const { stdout } = await exec('find', ['.', '-type', 'f', '-not', '-path', './.git/*', '-not', '-path', './node_modules/*', '-not', '-path', './.floo/*'], { cwd: projectRoot });
+      const { stdout } = await exec('find', [
+        '.', '-type', 'f',
+        '-not', '-path', './.git/*',
+        '-not', '-path', './node_modules/*',
+        '-not', '-path', './.floo/*',
+      ], { cwd: projectRoot });
       vars.project_structure = stdout.trim();
     } catch {
       vars.project_structure = '(无法获取项目结构)';
@@ -143,15 +221,26 @@ async function buildPrompt(
   }
 
   if (phase === 'reviewer') {
-    // 注入最近的 git diff
+    // Fix #6: 用 base-head 文件获取完整 diff，而不是只看 HEAD~1
     try {
-      const { execFile } = await import('node:child_process');
-      const { promisify } = await import('node:util');
-      const exec = promisify(execFile);
-      const { stdout } = await exec('git', ['diff', 'HEAD~1'], { cwd: projectRoot });
-      vars.diff = stdout.trim();
+      const signalsDir = join(flooDir, 'signals');
+      const baseHead = (await readFile(join(signalsDir, `${task.id}-coder.base-head`), 'utf-8')).trim();
+      if (baseHead) {
+        const { stdout } = await exec('git', ['diff', baseHead, 'HEAD'], { cwd: projectRoot });
+        vars.diff = stdout.trim();
+      } else {
+        // 新仓库，用 diff-tree 列出所有文件
+        const { stdout } = await exec('git', ['diff-tree', '--no-commit-id', '-p', '--root', '-r', 'HEAD'], { cwd: projectRoot });
+        vars.diff = stdout.trim();
+      }
     } catch {
-      vars.diff = '(无法获取 diff)';
+      // fallback: 至少看最近一个 commit
+      try {
+        const { stdout } = await exec('git', ['diff', 'HEAD~1'], { cwd: projectRoot });
+        vars.diff = stdout.trim();
+      } catch {
+        vars.diff = '(无法获取 diff)';
+      }
     }
   }
 
@@ -181,7 +270,6 @@ export async function runTask(
   const config = opts.config ?? DEFAULT_CONFIG;
   const flooDir = await ensureFlooDir(projectRoot);
 
-  // 确定从 startPhase 开始的 phase 序列
   const startIdx = PHASE_ORDER.indexOf(startPhase);
   if (startIdx === -1) {
     throw new Error(`Invalid start phase: ${startPhase}`);
@@ -191,21 +279,28 @@ export async function runTask(
   await saveTask(flooDir, task);
   await log(flooDir, 'dispatch', { task: task.id, start_phase: startPhase });
 
-  let reviewRounds = 0;  // coder → reviewer 循环计数
-  let runCounter = 0;    // 全局 run 计数
+  let reviewRounds = 0;
+  let runCounter = 0;
 
-  // 从 startPhase 开始遍历 phase
   let phaseIdx = startIdx;
   while (phaseIdx < PHASE_ORDER.length) {
     const phase = PHASE_ORDER[phaseIdx];
+
+    // Fix #3: scan/skip 级别跳过 reviewer phase
+    if (phase === 'reviewer' && task.review_level !== 'full') {
+      await log(flooDir, 'skip-reviewer', { task: task.id, review_level: task.review_level });
+      phaseIdx++;
+      continue;
+    }
+
     task.current_phase = phase;
     await saveTask(flooDir, task);
 
     // 执行当前 phase（含重试）
-    const result = await executePhase(task, phase, config, flooDir, projectRoot, adapters, ++runCounter);
+    runCounter++;
+    const result = await executePhase(task, phase, config, flooDir, projectRoot, adapters, runCounter);
 
     if (!result.success) {
-      // 到达重试上限，任务失败
       task.status = 'failed';
       task.current_phase = phase;
       await saveTask(flooDir, task);
@@ -213,41 +308,37 @@ export async function runTask(
       return task;
     }
 
+    // Fix #1: 收集 agent 产出的 artifact 到任务目录
+    await collectArtifact(projectRoot, flooDir, task, phase);
+
     // phase 完成后的特殊处理
-    if (phase === 'designer') {
-      // designer 产出的内容保存为 design.md
-      // （agent 应该已经在 cwd 写了 design.md，这里只做记录）
-      await log(flooDir, 'phase-done', { task: task.id, phase: 'designer' });
+    if (phase === 'planner') {
+      // Fix #2: 解析 plan.md 更新 task 的 scope/criteria/review_level
+      await consumePlannerOutput(flooDir, task);
     }
 
     if (phase === 'reviewer') {
-      // 检查 review 结论
       const verdict = await checkReviewVerdict(flooDir, task);
       if (verdict === 'fail') {
         reviewRounds++;
         if (reviewRounds >= MAX_REVIEW_ROUNDS) {
-          // review 循环到达上限
           task.status = 'failed';
           await saveTask(flooDir, task);
           await log(flooDir, 'failed', { task: task.id, reason: 'max_review_rounds', rounds: reviewRounds });
           return task;
         }
-        // 回退到 coder 重新修改
         await log(flooDir, 'review-fail', { task: task.id, round: reviewRounds });
         phaseIdx = PHASE_ORDER.indexOf('coder');
         continue;
       }
-      // review pass，继续下一个 phase
       await log(flooDir, 'review-pass', { task: task.id });
     }
 
     if (phase === 'coder') {
-      // scope 越界检查
       const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
       const outOfScope = findOutOfScope(exitArtifact.files_changed, task.scope);
       if (outOfScope.length > 0) {
         await log(flooDir, 'scope-violation', { task: task.id, files: outOfScope });
-        // Milestone 1：越界但无并发冲突，接受并更新 scope
         task.scope = [...new Set([...task.scope, ...exitArtifact.files_changed])];
         await saveTask(flooDir, task);
       }
@@ -256,7 +347,6 @@ export async function runTask(
     phaseIdx++;
   }
 
-  // 所有 phase 完成
   task.status = 'completed';
   task.current_phase = null;
   await saveTask(flooDir, task);
@@ -278,7 +368,6 @@ async function executePhase(
   adapters: Record<string, AgentAdapter>,
   runCounter: number,
 ): Promise<{ success: boolean; exitArtifact?: ExitArtifact }> {
-  // 解析角色绑定：任务级覆盖 > 项目级配置
   const binding = task.role_overrides?.[phase] ?? config.roles[phase];
   const adapter = adapters[binding.runtime];
   if (!adapter) {
@@ -288,16 +377,15 @@ async function executePhase(
   let lastError = '';
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-    const runId = `${String(runCounter).padStart(3, '0')}-${phase}`;
+    // Fix #4: runId 包含 attempt，避免重试覆盖
+    const runId = `${String(runCounter).padStart(3, '0')}-${phase}-${attempt}`;
 
-    // 组装 prompt
     const extraVars: TemplateVars = {};
     if (attempt > 1 && lastError) {
       extraVars.previous_error = lastError;
     }
     const prompt = await buildPrompt(projectRoot, flooDir, task, phase, extraVars);
 
-    // 创建 run 记录
     const run: RunRecord = {
       id: runId,
       task_id: task.id,
@@ -316,7 +404,6 @@ async function executePhase(
       task: task.id, phase, runtime: binding.runtime, attempt,
     });
 
-    // 启动 agent
     const spawnOpts: SpawnOptions = {
       taskId: task.id,
       phase,
@@ -329,13 +416,10 @@ async function executePhase(
     const sessionName = await adapter.spawn(spawnOpts);
     run.session_name = sessionName;
 
-    // 等待完成
     await waitForCompletion(sessionName, flooDir, task.id, phase);
 
-    // 读取结果
     const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
 
-    // 更新 run 记录
     run.finished_at = exitArtifact.finished_at;
     run.exit_code = exitArtifact.exit_code;
     run.duration_seconds = exitArtifact.duration_seconds;
@@ -346,18 +430,14 @@ async function executePhase(
       duration: `${exitArtifact.duration_seconds}s`,
     });
 
-    // 判断成功/失败
     if (exitArtifact.exit_code === 0) {
       return { success: true, exitArtifact };
     }
 
-    // 失败，收集错误信息用于下次重试
     if (exitArtifact.exit_code === -1) {
-      // 被外部终止（cancel/timeout）
       lastError = 'Agent was terminated externally';
       await log(flooDir, 'terminated', { task: task.id, phase, attempt });
     } else {
-      // 非零退出码，尝试获取 agent 输出作为错误上下文
       try {
         lastError = await adapter.getOutput(sessionName, 30);
       } catch {
@@ -369,7 +449,6 @@ async function executePhase(
     }
   }
 
-  // 所有重试耗尽
   return { success: false };
 }
 
@@ -385,25 +464,14 @@ async function checkReviewVerdict(
     const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
     const reviewContent = await readFile(join(taskDir, 'review.md'), 'utf-8');
 
-    // 查找 verdict: pass 或 verdict: fail（不区分大小写）
     const match = reviewContent.match(/verdict:\s*(pass|fail)/i);
     if (match) {
       return match[1].toLowerCase() as 'pass' | 'fail';
     }
 
-    // review_level 为 scan 或 skip 时，没有 review agent，直接 pass
-    if (task.review_level !== 'full') {
-      return 'pass';
-    }
-
-    // 找不到 verdict，默认 fail（保守策略）
-    return 'fail';
+    return 'fail'; // 找不到 verdict，保守策略
   } catch {
-    // review.md 不存在
-    if (task.review_level !== 'full') {
-      return 'pass';
-    }
-    return 'fail';
+    return 'fail'; // review.md 不存在
   }
 }
 
@@ -423,23 +491,23 @@ export async function createAndRun(
   const { projectRoot } = opts;
   const flooDir = await ensureFlooDir(projectRoot);
 
-  // 生成 batch ID
-  const date = new Date().toISOString().slice(0, 10);
-  const slug = description.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '-').replace(/-+/g, '-');
-  const batchId = `${date}-${slug}`;
+  // Fix #5: batchId 加时间戳后缀，避免碰撞
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10);
+  const timeSlug = now.toISOString().slice(11, 19).replace(/:/g, '');
+  const descSlug = description.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '-').replace(/-+/g, '-');
+  const batchId = `${date}-${timeSlug}-${descSlug}`;
 
-  // 创建批次
   const batch: Batch = {
     id: batchId,
     description,
     status: 'active',
     tasks: ['task-001'],
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
   };
   await saveBatch(flooDir, batch);
 
-  // 创建任务
   const task: Task = {
     id: 'task-001',
     batch_id: batchId,
@@ -449,15 +517,13 @@ export async function createAndRun(
     scope: opts.scope ?? [],
     acceptance_criteria: [],
     review_level: 'full',
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
+    created_at: now.toISOString(),
+    updated_at: now.toISOString(),
   };
   await saveTask(flooDir, task);
 
-  // 执行任务
   const result = await runTask(task, startPhase, opts);
 
-  // 更新批次状态
   batch.status = result.status === 'completed' ? 'completed' : 'active';
   await saveBatch(flooDir, batch);
 

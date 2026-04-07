@@ -17,6 +17,6 @@ export class CodexAdapter extends BaseAdapter {
   /** 构建 codex CLI 命令 */
   protected buildAgentCommand(opts: SpawnOptions): string {
     const escaped = escapeShellSingleQuote(opts.prompt);
-    return `codex --model ${opts.model} --dangerously-bypass-approvals-and-sandbox '${escaped}'`;
+    return `codex exec --model ${opts.model} --dangerously-bypass-approvals-and-sandbox '${escaped}'`;
   }
 }
