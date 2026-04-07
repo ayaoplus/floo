@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
-import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
+import { ensureFlooDir, detectConflicts } from './scope.js';
 import type {
   Task,
   Batch,
@@ -475,11 +475,21 @@ export async function runTask(
 
     if (phase === 'coder') {
       const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
-      const outOfScope = findOutOfScope(exitArtifact.files_changed, task.scope);
-      if (outOfScope.length > 0) {
-        await log(flooDir, 'scope-violation', { task: task.id, files: outOfScope });
-        task.scope = [...new Set([...task.scope, ...exitArtifact.files_changed])];
-        await saveTask(flooDir, task);
+      // 并行任务共享仓库，files_changed 是仓库级 diff（BASE_HEAD → CURRENT_HEAD），
+      // 会包含其他并行任务的变更。按 task scope 过滤，只保留本任务负责的文件。
+      const taskFiles = exitArtifact.files_changed.filter(
+        file => task.scope.some(s => {
+          const nf = file.replace(/\/+$/, '');
+          const ns = s.replace(/\/+$/, '');
+          return nf === ns || nf.startsWith(ns + '/') || ns.startsWith(nf + '/');
+        }),
+      );
+      if (taskFiles.length !== exitArtifact.files_changed.length) {
+        await log(flooDir, 'files-filtered', {
+          task: task.id,
+          raw: exitArtifact.files_changed.length,
+          filtered: taskFiles.length,
+        });
       }
     }
 
