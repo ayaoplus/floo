@@ -139,6 +139,33 @@ export interface CommitLock {
 }
 
 // ============================================================
+// 通知
+// ============================================================
+
+/** 通知事件类型 */
+export type NotificationEvent =
+  | 'task_started'
+  | 'phase_started'
+  | 'phase_completed'
+  | 'review_concluded'
+  | 'task_completed'
+  | 'batch_progress'
+  | 'batch_completed'
+  | 'error'
+  | 'retry';
+
+/** 通知记录（写入 .floo/notifications/ 的结构化 JSON） */
+export interface Notification {
+  id: string;              // 文件名标识：{timestamp}-{event}
+  timestamp: string;       // ISO 8601
+  batch_id: string;
+  task_id: string;
+  event: NotificationEvent;
+  phase?: Phase | null;
+  data: Record<string, unknown>;
+}
+
+// ============================================================
 // Agent Adapter
 // ============================================================
 

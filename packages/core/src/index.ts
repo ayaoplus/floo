@@ -42,3 +42,6 @@ export {
   checkTimeouts,
   getStatusSummary,
 } from './monitor.js';
+
+// Notifications
+export { notify, listNotifications, type NotificationFilter } from './notifications.js';
