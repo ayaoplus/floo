@@ -523,6 +523,15 @@ export async function runTask(
     if (phase === 'reviewer') {
       const verdict = await checkReviewVerdict(flooDir, task);
       if (verdict === 'fail') {
+        // 单 phase 模式（--from reviewer）：coder 不在执行范围内，不能回退修复
+        const coderInRange = PHASE_ORDER.indexOf('coder') >= startIdx && PHASE_ORDER.indexOf('coder') <= endIdx;
+        if (!coderInRange) {
+          task.status = 'failed';
+          await saveTask(flooDir, task);
+          await log(flooDir, 'failed', { task: task.id, reason: 'review_fail_no_coder', verdict: 'fail' });
+          await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'review_fail_no_coder' });
+          return task;
+        }
         reviewRounds++;
         if (reviewRounds >= MAX_REVIEW_ROUNDS) {
           task.status = 'failed';
@@ -543,6 +552,15 @@ export async function runTask(
     if (phase === 'tester') {
       const testResult = await checkTestResult(flooDir, task);
       if (testResult === 'fail') {
+        // 单 phase 模式（--from tester）：coder 不在执行范围内，不能回退修复
+        const coderInRange = PHASE_ORDER.indexOf('coder') >= startIdx && PHASE_ORDER.indexOf('coder') <= endIdx;
+        if (!coderInRange) {
+          task.status = 'failed';
+          await saveTask(flooDir, task);
+          await log(flooDir, 'failed', { task: task.id, reason: 'test_fail_no_coder', verdict: 'fail' });
+          await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'test_fail_no_coder' });
+          return task;
+        }
         testRounds++;
         if (testRounds >= MAX_TEST_ROUNDS) {
           task.status = 'failed';
@@ -814,16 +832,16 @@ async function runBatchSummaryReview(
     const signalsDir = join(flooDir, 'signals');
     const baseHead = (await readFile(join(signalsDir, `${batch.id}-batch.base-head`), 'utf-8')).trim();
     if (baseHead) {
+      // 正常情况：batch 开始时有 HEAD，diff 到当前 HEAD
       const { stdout } = await exec('git', ['diff', baseHead, 'HEAD'], { cwd: projectRoot });
+      batchDiff = stdout.trim();
+    } else {
+      // 新仓库：batch 开始时无 commit，用 diff-tree --root 获取所有变更
+      const { stdout } = await exec('git', ['diff-tree', '--no-commit-id', '-p', '--root', '-r', 'HEAD'], { cwd: projectRoot });
       batchDiff = stdout.trim();
     }
   } catch {
-    try {
-      const { stdout } = await exec('git', ['diff', 'HEAD~1'], { cwd: projectRoot });
-      batchDiff = stdout.trim();
-    } catch {
-      batchDiff = '(无法获取 diff)';
-    }
+    batchDiff = '(无法获取 diff)';
   }
 
   // 组装 summary review prompt
@@ -1107,12 +1125,15 @@ export async function createAndRun(
   await notify(flooDir, 'task_started', { batch_id: batchId, task_id: mainTask.id, description });
 
   // 记录批次创建时的 HEAD，用于 summary review 的 diff 基线（不受 coder 重跑覆盖影响）
+  // 新仓库无 HEAD 时写空字符串，summary review 会用 diff-tree --root 兜底
+  const signalsDir = join(flooDir, 'signals');
+  await mkdir(signalsDir, { recursive: true });
+  let batchBaseHead = '';
   try {
     const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: projectRoot });
-    const signalsDir = join(flooDir, 'signals');
-    await mkdir(signalsDir, { recursive: true });
-    await writeFile(join(signalsDir, `${batchId}-batch.base-head`), stdout.trim());
-  } catch { /* 新仓库无 HEAD，忽略 */ }
+    batchBaseHead = stdout.trim();
+  } catch { /* 新仓库无 HEAD */ }
+  await writeFile(join(signalsDir, `${batchId}-batch.base-head`), batchBaseHead);
 
   // 如果从 coder 或更后的 phase 开始，跳过 planner，直接单任务执行
   // coder 开始 → 跑完整后续流程（coder→reviewer→tester）
@@ -1204,10 +1225,9 @@ export async function createAndRun(
   batch.status = allCompleted ? 'completed' : 'active';
   await saveBatch(flooDir, batch);
 
-  // 批次完成后触发整体 review（只读报告，不修改代码）
-  const completedTasks = results.filter(t => t.status === 'completed');
-  if (completedTasks.length > 0) {
-    await runBatchSummaryReview(flooDir, batch, completedTasks, config, projectRoot, adapters);
+  // 所有任务完成后才触发整体 review（避免失败任务的 commit 混进 summary diff）
+  if (allCompleted) {
+    await runBatchSummaryReview(flooDir, batch, results, config, projectRoot, adapters);
   }
 
   await notify(flooDir, 'batch_completed', {
