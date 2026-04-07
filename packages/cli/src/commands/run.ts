@@ -1,0 +1,93 @@
+/**
+ * floo run — 创建任务并执行
+ * clean working tree 检查 → 路由 → 创建批次 → dispatcher 驱动全流程
+ */
+
+import { Command } from 'commander';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import {
+  createAndRun,
+  routeTask,
+  ClaudeAdapter,
+  CodexAdapter,
+  DEFAULT_CONFIG,
+  type Phase,
+  type FlooConfig,
+} from '@floo/core';
+
+const exec = promisify(execFile);
+
+export const runCommand = new Command('run')
+  .description('创建并执行任务')
+  .argument('<description>', '任务描述')
+  .option('--from <phase>', '指定起始阶段 (designer/planner/coder/reviewer)')
+  .option('--scope <files...>', '指定文件 scope')
+  .action(async (description: string, options: { from?: string; scope?: string[] }) => {
+    const cwd = process.cwd();
+
+    // Milestone 1 强约束：working tree 必须干净
+    try {
+      const { stdout } = await exec('git', ['status', '--porcelain'], { cwd });
+      if (stdout.trim().length > 0) {
+        console.error('错误：working tree 不干净。请先 commit 或 stash 未提交的变更。');
+        console.error('运行 `git status` 查看详情。');
+        process.exit(1);
+      }
+    } catch {
+      console.error('警告：无法检查 git 状态，可能不是 git 仓库。');
+    }
+
+    // 路由：决定从哪个 phase 开始
+    const startPhase = routeTask(description, {
+      from: options.from as Phase | undefined,
+      scope: options.scope,
+    });
+
+    console.log(`任务: ${description}`);
+    console.log(`起始阶段: ${startPhase}`);
+    if (options.scope) {
+      console.log(`Scope: ${options.scope.join(', ')}`);
+    }
+    console.log('');
+
+    // 加载配置
+    let config: FlooConfig = DEFAULT_CONFIG;
+    try {
+      const configContent = await readFile(join(cwd, 'floo.config.json'), 'utf-8');
+      config = { ...DEFAULT_CONFIG, ...JSON.parse(configContent) };
+    } catch { /* 使用默认配置 */ }
+
+    // 初始化 adapters
+    const adapters = {
+      claude: new ClaudeAdapter(),
+      codex: new CodexAdapter(),
+    };
+
+    console.log('开始执行...\n');
+
+    try {
+      const { batch, task } = await createAndRun(description, startPhase, {
+        projectRoot: cwd,
+        config,
+        adapters,
+        scope: options.scope,
+      });
+
+      if (task.status === 'completed') {
+        console.log(`\n✓ 任务完成`);
+        console.log(`  批次: ${batch.id}`);
+        console.log(`  任务: ${task.id}`);
+      } else {
+        console.log(`\n✗ 任务未完成 (${task.status})`);
+        console.log(`  当前阶段: ${task.current_phase ?? 'N/A'}`);
+        console.log(`  批次: ${batch.id}`);
+        process.exit(1);
+      }
+    } catch (err) {
+      console.error('执行失败:', err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });

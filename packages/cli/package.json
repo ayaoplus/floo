@@ -11,6 +11,7 @@
     "dev": "tsc --watch"
   },
   "dependencies": {
-    "@floo/core": "*"
+    "@floo/core": "*",
+    "commander": "^14.0.3"
   }
 }
