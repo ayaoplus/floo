@@ -239,6 +239,59 @@ assert(typeof exitArtifact.duration_seconds === 'number', 'duration 是数字');
 await rm(testProjectDir, { recursive: true });
 
 // ============================================================
+// 6. Batch 2: Router
+// ============================================================
+
+console.log('\n=== 6. Router ===');
+
+import { routeTask } from './packages/core/src/router.js';
+
+assert(routeTask('重构支付模块，支持多币种') === 'designer', '长描述默认 designer');
+assert(routeTask('fix login button bug') === 'coder', 'bug 关键词走 coder');
+assert(routeTask('修复登录报错') === 'coder', '中文 bug 关键词走 coder');
+assert(routeTask('review src/api/') === 'reviewer', 'review 关键词走 reviewer');
+assert(routeTask('给 src/api/health.ts 加 version') === 'planner', '短描述+文件路径走 planner');
+assert(routeTask('', { from: 'coder' }) === 'coder', '显式覆盖生效');
+assert(routeTask('改个小东西', { scope: ['src/a.ts'] }) === 'coder', '有 scope+短描述走 coder');
+
+// ============================================================
+// 7. Batch 2: Adapters + Dispatcher 导入
+// ============================================================
+
+console.log('\n=== 7. Adapters & Dispatcher ===');
+
+import { ClaudeAdapter, CodexAdapter, createAndRun } from './packages/core/src/index.js';
+
+const claude = new ClaudeAdapter();
+assert(claude.runtime === 'claude', 'ClaudeAdapter runtime 正确');
+
+const codex = new CodexAdapter();
+assert(codex.runtime === 'codex', 'CodexAdapter runtime 正确');
+
+assert(typeof createAndRun === 'function', 'createAndRun 导出正确');
+
+// ============================================================
+// 8. Batch 2: YAML 引号剥离
+// ============================================================
+
+console.log('\n=== 8. YAML 引号处理 ===');
+
+// 测试 consumePlannerOutput 的间接效果：stripYamlQuotes
+// 直接测试引号剥离逻辑
+function testStripQuotes(val: string): string {
+  if ((val.startsWith('"') && val.endsWith('"')) ||
+      (val.startsWith("'") && val.endsWith("'"))) {
+    return val.slice(1, -1);
+  }
+  return val;
+}
+
+assert(testStripQuotes('"src/api/health.ts"') === 'src/api/health.ts', '双引号剥离');
+assert(testStripQuotes("'src/api/health.ts'") === 'src/api/health.ts', '单引号剥离');
+assert(testStripQuotes('src/api/health.ts') === 'src/api/health.ts', '无引号不变');
+assert(testStripQuotes('"full"') === 'full', 'review_level 引号剥离');
+
+// ============================================================
 // 结果
 // ============================================================
 

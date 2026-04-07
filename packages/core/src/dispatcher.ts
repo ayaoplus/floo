@@ -74,6 +74,19 @@ async function saveRun(flooDir: string, batchId: string, taskId: string, run: Ru
 }
 
 // ============================================================
+// 工具函数
+// ============================================================
+
+/** 去掉 YAML 值的引号：`"foo"` → `foo`，`'bar'` → `bar` */
+function stripYamlQuotes(value: string): string {
+  if ((value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+// ============================================================
 // Artifact 收集
 // ============================================================
 
@@ -113,6 +126,21 @@ async function collectArtifact(
 }
 
 /**
+ * 在 phase 执行前删除项目根目录的旧 artifact
+ * 防止 agent 失败时 collectArtifact 复制到上一轮的陈旧文件
+ */
+async function cleanStaleArtifact(projectRoot: string, phase: Phase): Promise<void> {
+  const filename = PHASE_ARTIFACTS[phase];
+  if (!filename) return;
+
+  const filePath = join(projectRoot, filename);
+  try {
+    const { unlink } = await import('node:fs/promises');
+    await unlink(filePath);
+  } catch { /* 文件不存在，忽略 */ }
+}
+
+/**
  * Planner 完成后，解析 plan.md 中的 YAML 更新 task 的 scope、acceptance_criteria、review_level
  */
 async function consumePlannerOutput(
@@ -128,13 +156,13 @@ async function consumePlannerOutput(
   }
 
   // 从 plan.md 提取 YAML 块中的 scope 和 acceptance_criteria
-  // 简单正则提取，不引入 YAML 解析器
+  // 简单正则提取，不引入 YAML 解析器。提取后去掉 YAML 引号。
   const scopeMatches = content.matchAll(/scope:\s*\n((?:\s+-\s+.+\n?)+)/g);
   const scopes: string[] = [];
   for (const m of scopeMatches) {
     const items = m[1].matchAll(/^\s+-\s+(.+)/gm);
     for (const item of items) {
-      scopes.push(item[1].trim());
+      scopes.push(stripYamlQuotes(item[1].trim()));
     }
   }
   if (scopes.length > 0) {
@@ -145,12 +173,12 @@ async function consumePlannerOutput(
   if (criteriaMatch) {
     const items = criteriaMatch[1].matchAll(/^\s+-\s+(.+)/gm);
     for (const item of items) {
-      task.acceptance_criteria.push(item[1].trim());
+      task.acceptance_criteria.push(stripYamlQuotes(item[1].trim()));
     }
   }
 
-  // 提取 review_level
-  const levelMatch = content.match(/review_level:\s*(full|scan|skip)/i);
+  // 提取 review_level（处理带引号和不带引号两种情况）
+  const levelMatch = content.match(/review_level:\s*["']?(full|scan|skip)["']?/i);
   if (levelMatch) {
     task.review_level = levelMatch[1].toLowerCase() as Task['review_level'];
   }
@@ -295,6 +323,9 @@ export async function runTask(
 
     task.current_phase = phase;
     await saveTask(flooDir, task);
+
+    // 清理项目根目录的旧 artifact，防止 collectArtifact 吃到上一轮的陈旧产物
+    await cleanStaleArtifact(projectRoot, phase);
 
     // 执行当前 phase（含重试）
     runCounter++;
