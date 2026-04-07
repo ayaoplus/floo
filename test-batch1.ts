@@ -71,6 +71,7 @@ const mockTask: Task = {
   review_level: 'full',
   created_at: new Date().toISOString(),
   updated_at: new Date().toISOString(),
+  depends_on: [],
 };
 assert(mockTask.id === 'task-001', 'Task 类型可以正常构造');
 

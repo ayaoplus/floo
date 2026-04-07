@@ -29,7 +29,7 @@ export { CodexAdapter } from './adapters/codex.js';
 export { routeTask } from './router.js';
 
 // Dispatcher
-export { runTask, createAndRun } from './dispatcher.js';
+export { runTask, createAndRun, type DispatcherOptions } from './dispatcher.js';
 
 // Monitor
 export {

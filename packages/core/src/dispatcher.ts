@@ -10,7 +10,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
-import { findOutOfScope, ensureFlooDir } from './scope.js';
+import { findOutOfScope, ensureFlooDir, detectConflicts, acquireCommitLock, releaseCommitLock } from './scope.js';
 import type {
   Task,
   Batch,
@@ -140,56 +140,146 @@ async function cleanStaleArtifact(projectRoot: string, phase: Phase): Promise<vo
   } catch { /* 文件不存在，忽略 */ }
 }
 
+/** 从 YAML 列表块提取列表项 */
+function extractYamlList(block: string): string[] {
+  const items: string[] = [];
+  const matches = block.matchAll(/^\s+-\s+(.+)/gm);
+  for (const m of matches) {
+    items.push(stripYamlQuotes(m[1].trim()));
+  }
+  return items;
+}
+
+/** 解析后的子任务定义 */
+interface ParsedTask {
+  id: string;
+  description: string;
+  scope: string[];
+  acceptance_criteria: string[];
+  review_level: 'full' | 'scan' | 'skip';
+  depends_on: string[];
+}
+
 /**
- * Planner 完成后，解析 plan.md 中的 YAML 更新 task 的 scope、acceptance_criteria、review_level
+ * 解析 plan.md 拆出多个子任务
+ * 支持两种格式：
+ * 1. 多任务 YAML（每个 task 有 id、description、scope 等）
+ * 2. 单任务简单格式（只有 scope 和 acceptance_criteria，兼容 M1）
+ */
+function parsePlanTasks(content: string): ParsedTask[] {
+  const tasks: ParsedTask[] = [];
+
+  // 尝试匹配多任务块：以 `- id:` 开头的 YAML 列表
+  const taskBlocks = content.split(/(?=^-\s+id:\s*)/m).filter(b => b.trim().length > 0);
+
+  for (const block of taskBlocks) {
+    const idMatch = block.match(/id:\s*["']?([^\s"']+)["']?/);
+    if (!idMatch) continue; // 不是任务块
+
+    const descMatch = block.match(/description:\s*["']?(.+?)["']?\s*$/m);
+    const scopeMatch = block.match(/scope:\s*\n((?:\s+-\s+.+\n?)+)/);
+    const criteriaMatch = block.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)+)/);
+    const levelMatch = block.match(/review_level:\s*["']?(full|scan|skip)["']?/i);
+    const depsMatch = block.match(/depends_on:\s*\n((?:\s+-\s+.+\n?)+)/);
+
+    tasks.push({
+      id: stripYamlQuotes(idMatch[1]),
+      description: descMatch ? stripYamlQuotes(descMatch[1].trim()) : '',
+      scope: scopeMatch ? extractYamlList(scopeMatch[1]) : [],
+      acceptance_criteria: criteriaMatch ? extractYamlList(criteriaMatch[1]) : [],
+      review_level: levelMatch ? levelMatch[1].toLowerCase() as 'full' | 'scan' | 'skip' : 'full',
+      depends_on: depsMatch ? extractYamlList(depsMatch[1]) : [],
+    });
+  }
+
+  // 兼容 M1 单任务格式：没找到多任务块，提取全局 scope/criteria
+  if (tasks.length === 0) {
+    const scope: string[] = [];
+    const scopeMatches = content.matchAll(/scope:\s*\n((?:\s+-\s+.+\n?)+)/g);
+    for (const m of scopeMatches) {
+      scope.push(...extractYamlList(m[1]));
+    }
+    const criteriaMatch = content.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)+)/);
+    const levelMatch = content.match(/review_level:\s*["']?(full|scan|skip)["']?/i);
+
+    tasks.push({
+      id: 'task-001',
+      description: '',
+      scope,
+      acceptance_criteria: criteriaMatch ? extractYamlList(criteriaMatch[1]) : [],
+      review_level: levelMatch ? levelMatch[1].toLowerCase() as 'full' | 'scan' | 'skip' : 'full',
+      depends_on: [],
+    });
+  }
+
+  return tasks;
+}
+
+/**
+ * Planner 完成后，解析 plan.md 创建/更新子任务
+ * 返回所有子任务（用于后续并行调度）
  */
 async function consumePlannerOutput(
   flooDir: string,
-  task: Task,
-): Promise<void> {
-  const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
+  batch: Batch,
+  parentTask: Task,
+): Promise<Task[]> {
+  const taskDir = join(flooDir, 'batches', batch.id, 'tasks', parentTask.id);
   let content: string;
   try {
     content = await readFile(join(taskDir, 'plan.md'), 'utf-8');
   } catch {
-    return; // plan.md 不存在，跳过
+    return [parentTask]; // plan.md 不存在，用原 task 继续
   }
 
-  // 从 plan.md 提取 YAML 块中的 scope 和 acceptance_criteria
-  // 简单正则提取，不引入 YAML 解析器。提取后去掉 YAML 引号。
-  const scopeMatches = content.matchAll(/scope:\s*\n((?:\s+-\s+.+\n?)+)/g);
-  const scopes: string[] = [];
-  for (const m of scopeMatches) {
-    const items = m[1].matchAll(/^\s+-\s+(.+)/gm);
-    for (const item of items) {
-      scopes.push(stripYamlQuotes(item[1].trim()));
+  const parsed = parsePlanTasks(content);
+
+  if (parsed.length <= 1) {
+    // 单任务：更新原 task 的 scope/criteria/review_level
+    const p = parsed[0];
+    if (p) {
+      if (p.scope.length > 0) parentTask.scope = [...new Set([...parentTask.scope, ...p.scope])];
+      if (p.acceptance_criteria.length > 0) parentTask.acceptance_criteria = p.acceptance_criteria;
+      parentTask.review_level = p.review_level;
+      await saveTask(flooDir, parentTask);
     }
-  }
-  if (scopes.length > 0) {
-    task.scope = [...new Set([...task.scope, ...scopes])];
-  }
-
-  const criteriaMatch = content.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)+)/);
-  if (criteriaMatch) {
-    const items = criteriaMatch[1].matchAll(/^\s+-\s+(.+)/gm);
-    for (const item of items) {
-      task.acceptance_criteria.push(stripYamlQuotes(item[1].trim()));
-    }
+    await log(flooDir, 'plan-consumed', { task: parentTask.id, sub_tasks: 1 });
+    return [parentTask];
   }
 
-  // 提取 review_level（处理带引号和不带引号两种情况）
-  const levelMatch = content.match(/review_level:\s*["']?(full|scan|skip)["']?/i);
-  if (levelMatch) {
-    task.review_level = levelMatch[1].toLowerCase() as Task['review_level'];
+  // 多任务：为每个子任务创建 Task 对象
+  const now = new Date().toISOString();
+  const tasks: Task[] = [];
+
+  for (const p of parsed) {
+    const task: Task = {
+      id: p.id,
+      batch_id: batch.id,
+      description: p.description || parentTask.description,
+      status: 'pending',
+      current_phase: null,
+      scope: p.scope,
+      acceptance_criteria: p.acceptance_criteria,
+      review_level: p.review_level,
+      created_at: now,
+      updated_at: now,
+      depends_on: p.depends_on,
+    };
+    await saveTask(flooDir, task);
+    tasks.push(task);
   }
 
-  await saveTask(flooDir, task);
+  // 更新 batch 的 task 列表
+  batch.tasks = tasks.map(t => t.id);
+  await saveBatch(flooDir, batch);
+
   await log(flooDir, 'plan-consumed', {
-    task: task.id,
-    scope_count: task.scope.length,
-    criteria_count: task.acceptance_criteria.length,
-    review_level: task.review_level,
+    task: parentTask.id,
+    sub_tasks: tasks.length,
+    task_ids: tasks.map(t => t.id),
   });
+
+  return tasks;
 }
 
 // ============================================================
@@ -344,8 +434,14 @@ export async function runTask(
 
     // phase 完成后的特殊处理
     if (phase === 'planner') {
-      // Fix #2: 解析 plan.md 更新 task 的 scope/criteria/review_level
-      await consumePlannerOutput(flooDir, task);
+      // 单任务模式：解析 plan.md 更新当前 task（不拆子任务）
+      const dummyBatch: Batch = { id: task.batch_id, description: '', status: 'active', tasks: [task.id], created_at: '', updated_at: '' };
+      const subTasks = await consumePlannerOutput(flooDir, dummyBatch, task);
+      // 如果只有一个子任务，直接用更新后的 task 继续
+      if (subTasks.length === 1) {
+        Object.assign(task, subTasks[0]);
+      }
+      // 多任务情况由 runBatch 处理，runTask 不处理
     }
 
     if (phase === 'reviewer') {
@@ -511,18 +607,116 @@ async function checkReviewVerdict(
 // ============================================================
 
 /**
+ * 并行执行多个任务（scope 无冲突的同时跑，有冲突的按依赖串行）
+ * 每个子任务从 coder 阶段开始（designer/planner 已在 batch 级别完成）
+ */
+async function runBatch(
+  tasks: Task[],
+  opts: DispatcherOptions,
+): Promise<Task[]> {
+  const { projectRoot, adapters } = opts;
+  const config = opts.config ?? DEFAULT_CONFIG;
+  const flooDir = await ensureFlooDir(projectRoot);
+
+  // 用 scope 冲突检测判断并行/串行
+  const conflicts = detectConflicts(tasks.map(t => ({ id: t.id, scope: t.scope })));
+  const conflictPairs = new Set(conflicts.flatMap(c => [`${c.task_a}:${c.task_b}`, `${c.task_b}:${c.task_a}`]));
+
+  const completed = new Set<string>();
+  const results: Task[] = [];
+
+  /** 检查任务是否可以开始（依赖已完成 + 无 scope 冲突的 running 任务） */
+  function canStart(task: Task, running: Set<string>): boolean {
+    // 依赖检查
+    if (task.depends_on.some(dep => !completed.has(dep))) return false;
+    // scope 冲突检查：不和任何 running 任务有冲突
+    for (const rid of running) {
+      if (conflictPairs.has(`${task.id}:${rid}`)) return false;
+    }
+    return true;
+  }
+
+  const pending = new Map(tasks.map(t => [t.id, t]));
+  const running = new Map<string, Promise<Task>>();
+
+  await log(flooDir, 'batch-start', {
+    total: tasks.length,
+    task_ids: tasks.map(t => t.id),
+    conflicts: conflicts.length,
+  });
+
+  // 调度循环：持续 dispatch 可启动的任务，等待完成的任务
+  while (pending.size > 0 || running.size > 0) {
+    // dispatch 所有可启动的任务
+    const runningIds = new Set(running.keys());
+    for (const [id, task] of pending) {
+      if (canStart(task, runningIds)) {
+        pending.delete(id);
+        runningIds.add(id);
+
+        await log(flooDir, 'parallel-dispatch', { task: id });
+
+        // 从 coder 开始跑（designer/planner 已在 batch 级别完成）
+        const promise = runTask(task, 'coder', opts).then(result => {
+          completed.add(id);
+          return result;
+        });
+        running.set(id, promise);
+      }
+    }
+
+    if (running.size === 0 && pending.size > 0) {
+      // 死锁检测：有待处理任务但没有能启动的
+      await log(flooDir, 'deadlock', { pending: [...pending.keys()] });
+      // 强制启动第一个 pending 任务打破死锁
+      const [id, task] = [...pending.entries()][0];
+      pending.delete(id);
+      const promise = runTask(task, 'coder', opts).then(result => {
+        completed.add(id);
+        return result;
+      });
+      running.set(id, promise);
+    }
+
+    // 等待任意一个 running 任务完成
+    if (running.size > 0) {
+      const settled = await Promise.race(
+        [...running.entries()].map(([id, p]) => p.then(r => ({ id, result: r }))),
+      );
+      running.delete(settled.id);
+      results.push(settled.result);
+
+      await log(flooDir, 'parallel-done', {
+        task: settled.id,
+        status: settled.result.status,
+        remaining: pending.size + running.size,
+      });
+    }
+  }
+
+  return results;
+}
+
+/**
  * 创建批次和任务，启动执行
  * 这是 `floo run` 的核心入口
+ *
+ * 流程：
+ * 1. 如果从 designer 开始 → designer phase → planner phase → 拆子任务
+ * 2. 如果从 planner 开始 → planner phase → 拆子任务
+ * 3. 拆出多子任务 → runBatch 并行调度（每个从 coder 开始）
+ * 4. 单任务 → 直接 runTask
+ * 5. 如果从 coder/reviewer 开始 → 直接 runTask（跳过 planner）
  */
 export async function createAndRun(
   description: string,
   startPhase: Phase,
   opts: DispatcherOptions & { scope?: string[] },
-): Promise<{ batch: Batch; task: Task }> {
+): Promise<{ batch: Batch; tasks: Task[] }> {
   const { projectRoot } = opts;
+  const config = opts.config ?? DEFAULT_CONFIG;
   const flooDir = await ensureFlooDir(projectRoot);
 
-  // Fix #5: batchId 加时间戳后缀，避免碰撞
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
   const timeSlug = now.toISOString().slice(11, 19).replace(/:/g, '');
@@ -539,7 +733,7 @@ export async function createAndRun(
   };
   await saveBatch(flooDir, batch);
 
-  const task: Task = {
+  const mainTask: Task = {
     id: 'task-001',
     batch_id: batchId,
     description,
@@ -550,13 +744,73 @@ export async function createAndRun(
     review_level: 'full',
     created_at: now.toISOString(),
     updated_at: now.toISOString(),
+    depends_on: [],
   };
-  await saveTask(flooDir, task);
+  await saveTask(flooDir, mainTask);
 
-  const result = await runTask(task, startPhase, opts);
+  // 如果从 coder 或 reviewer 开始，跳过 planner，直接单任务执行
+  const startIdx = PHASE_ORDER.indexOf(startPhase);
+  const coderIdx = PHASE_ORDER.indexOf('coder');
+  if (startIdx >= coderIdx) {
+    const result = await runTask(mainTask, startPhase, opts);
+    batch.status = result.status === 'completed' ? 'completed' : 'active';
+    await saveBatch(flooDir, batch);
+    return { batch, tasks: [result] };
+  }
 
-  batch.status = result.status === 'completed' ? 'completed' : 'active';
+  // 从 designer 或 planner 开始：先跑前置 phase 到 planner 完成
+  const adapters = opts.adapters;
+  mainTask.status = 'running';
+  await saveTask(flooDir, mainTask);
+
+  // 执行 designer（如果需要）
+  if (startPhase === 'designer') {
+    mainTask.current_phase = 'designer';
+    await saveTask(flooDir, mainTask);
+    await cleanStaleArtifact(projectRoot, 'designer');
+    const designResult = await executePhase(mainTask, 'designer', config, flooDir, projectRoot, adapters, 1);
+    if (!designResult.success) {
+      mainTask.status = 'failed';
+      await saveTask(flooDir, mainTask);
+      return { batch, tasks: [mainTask] };
+    }
+    await collectArtifact(projectRoot, flooDir, mainTask, 'designer');
+  }
+
+  // 执行 planner
+  mainTask.current_phase = 'planner';
+  await saveTask(flooDir, mainTask);
+  await cleanStaleArtifact(projectRoot, 'planner');
+  const planResult = await executePhase(mainTask, 'planner', config, flooDir, projectRoot, adapters, 2);
+  if (!planResult.success) {
+    mainTask.status = 'failed';
+    await saveTask(flooDir, mainTask);
+    return { batch, tasks: [mainTask] };
+  }
+  await collectArtifact(projectRoot, flooDir, mainTask, 'planner');
+
+  // 解析 plan.md 拆子任务
+  const subTasks = await consumePlannerOutput(flooDir, batch, mainTask);
+
+  if (subTasks.length <= 1) {
+    // 单任务：继续跑 coder → reviewer
+    const task = subTasks[0] ?? mainTask;
+    const result = await runTask(task, 'coder', opts);
+    batch.status = result.status === 'completed' ? 'completed' : 'active';
+    await saveBatch(flooDir, batch);
+    return { batch, tasks: [result] };
+  }
+
+  // 多任务：并行调度
+  mainTask.status = 'completed'; // 主任务完成（拆分完毕）
+  await saveTask(flooDir, mainTask);
+
+  const results = await runBatch(subTasks, opts);
+
+  // 更新 batch 状态
+  const allCompleted = results.every(t => t.status === 'completed');
+  batch.status = allCompleted ? 'completed' : 'active';
   await saveBatch(flooDir, batch);
 
-  return { batch, task: result };
+  return { batch, tasks: results };
 }

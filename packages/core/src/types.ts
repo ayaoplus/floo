@@ -73,6 +73,8 @@ export interface Task {
   review_level: 'full' | 'scan' | 'skip';
   created_at: string;        // ISO 8601
   updated_at: string;
+  /** 依赖的其他任务 ID（depends_on 中的任务全部 completed 后才能开始） */
+  depends_on: string[];
   /** 角色绑定覆盖（任务级 > 项目级 > 系统默认） */
   role_overrides?: Partial<Record<Phase, RoleBinding>>;
 }

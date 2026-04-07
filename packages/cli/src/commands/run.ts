@@ -85,21 +85,27 @@ export const runCommand = new Command('run')
     console.log('开始执行...\n');
 
     try {
-      const { batch, task } = await createAndRun(description, startPhase, {
+      const { batch, tasks } = await createAndRun(description, startPhase, {
         projectRoot: cwd,
         config,
         adapters,
         scope: options.scope,
       });
 
-      if (task.status === 'completed') {
-        console.log(`\n✓ 任务完成`);
+      const allCompleted = tasks.every(t => t.status === 'completed');
+      if (allCompleted) {
+        console.log(`\n✓ 全部完成（${tasks.length} 个任务）`);
         console.log(`  批次: ${batch.id}`);
-        console.log(`  任务: ${task.id}`);
+        for (const t of tasks) {
+          console.log(`  ${t.id}: ${t.status}`);
+        }
       } else {
-        console.log(`\n✗ 任务未完成 (${task.status})`);
-        console.log(`  当前阶段: ${task.current_phase ?? 'N/A'}`);
+        console.log(`\n✗ 部分任务未完成`);
         console.log(`  批次: ${batch.id}`);
+        for (const t of tasks) {
+          const phase = t.current_phase ? ` @ ${t.current_phase}` : '';
+          console.log(`  ${t.id}: ${t.status}${phase}`);
+        }
         process.exit(1);
       }
     } catch (err) {
