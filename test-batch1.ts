@@ -132,13 +132,23 @@ try {
 }
 
 // 释放锁
-await releaseCommitLock(testDir);
+await releaseCommitLock(testDir, 'T001');
 assert(true, '锁释放成功');
+
+// 用错误的 taskId 释放应该报错
+await acquireCommitLock(testDir, 'T001', 'floo-T001-coder');
+try {
+  await releaseCommitLock(testDir, 'T999');
+  assert(false, '用错误 taskId 释放应该报错');
+} catch (err) {
+  assert(String(err).includes('Cannot release lock'), '持有者验证正确');
+}
+await releaseCommitLock(testDir, 'T001');
 
 // 释放后可以重新获取
 await acquireCommitLock(testDir, 'T002', 'floo-T002-coder');
 assert(true, '释放后重新获取成功');
-await releaseCommitLock(testDir);
+await releaseCommitLock(testDir, 'T002');
 
 // 清理
 await rm(testDir, { recursive: true });

@@ -4,7 +4,7 @@
  */
 
 import { execFile } from 'node:child_process';
-import { readFile, writeFile, mkdir, access, chmod } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, access, chmod, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import type { AgentAdapter, SpawnOptions, ExitArtifact, Runtime } from '../types.js';
@@ -47,6 +47,15 @@ async function sendKeys(name: string, keys: string): Promise<void> {
   await tmux('send-keys', '-t', name, keys, 'Enter');
 }
 
+/** 安全删除文件（不存在时不报错） */
+async function safeUnlink(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch {
+    // 文件不存在，忽略
+  }
+}
+
 /** 强制关闭 tmux session */
 async function killSession(name: string): Promise<void> {
   try {
@@ -79,6 +88,9 @@ function buildRunnerScript(opts: {
 set -e
 cd '${cwd}'
 
+# 记录启动前的 HEAD，用于后续 diff 比较
+BASE_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+
 # 运行 agent，捕获退出码（不要因为 agent 失败就中断脚本）
 START_TIME=$(date -u +%s)
 set +e
@@ -90,12 +102,22 @@ END_TIME=$(date -u +%s)
 DURATION=$((END_TIME - START_TIME))
 FINISHED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# 收集 git 变更文件
+# 收集所有变更文件：committed + staged + unstaged + untracked
 FILES_JSON="[]"
 if git rev-parse --git-dir > /dev/null 2>&1; then
-  FILES_CHANGED=$(git diff --name-only HEAD 2>/dev/null | head -100)
+  FILES_CHANGED=""
+  # 1. 对比 base HEAD 到当前 HEAD 的 committed changes
+  CURRENT_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+  if [ -n "$BASE_HEAD" ] && [ -n "$CURRENT_HEAD" ] && [ "$BASE_HEAD" != "$CURRENT_HEAD" ]; then
+    FILES_CHANGED=$(git diff --name-only "$BASE_HEAD" "$CURRENT_HEAD" 2>/dev/null)
+  fi
+  # 2. staged + unstaged changes
+  WORKING_CHANGES=$(git diff --name-only HEAD 2>/dev/null)
+  # 3. untracked files
+  UNTRACKED=$(git ls-files --others --exclude-standard 2>/dev/null)
+  # 合并去重
+  FILES_CHANGED=$(printf '%s\\n%s\\n%s' "$FILES_CHANGED" "$WORKING_CHANGES" "$UNTRACKED" | sort -u | sed '/^$/d' | head -100)
   if [ -n "$FILES_CHANGED" ]; then
-    # 把文件列表转成 JSON 数组
     FILES_JSON=$(echo "$FILES_CHANGED" | awk 'BEGIN{printf "["} NR>1{printf ","} {printf "\\"%s\\"", $0} END{printf "]"}')
   fi
 fi
@@ -141,6 +163,12 @@ export abstract class BaseAdapter implements AgentAdapter {
     // 确保 signals 目录存在
     await mkdir(signalsDir, { recursive: true });
 
+    // 清理旧的 exit artifact 和脚本，防止重试时读到 stale 数据
+    const exitFile = join(signalsDir, `${opts.taskId}-${opts.phase}.exit`);
+    const oldScript = join(signalsDir, `${opts.taskId}-${opts.phase}.sh`);
+    await safeUnlink(exitFile);
+    await safeUnlink(oldScript);
+
     // 如果同名 session 已存在，先清理
     if (await sessionExists(sessionName)) {
       await killSession(sessionName);
@@ -184,8 +212,29 @@ export abstract class BaseAdapter implements AgentAdapter {
     await sendKeys(sessionName, msg);
   }
 
-  async kill(sessionName: string): Promise<void> {
+  /**
+   * 强制终止 session 并写入 exit artifact
+   * kill 后 floo-runner 脚本不会执行到写文件步骤，所以这里主动补写
+   */
+  async kill(sessionName: string, cwd: string, taskId: string, phase: string): Promise<void> {
     await killSession(sessionName);
+
+    // 主动写 exit artifact，标记为被终止（exit_code = -1）
+    const signalsDir = join(cwd, '.floo', 'signals');
+    await mkdir(signalsDir, { recursive: true });
+    const exitFile = join(signalsDir, `${taskId}-${phase}.exit`);
+
+    const artifact: ExitArtifact = {
+      task_id: taskId,
+      phase: phase as ExitArtifact['phase'],
+      session_name: sessionName,
+      exit_code: -1,  // 特殊值：被外部终止
+      finished_at: new Date().toISOString(),
+      duration_seconds: -1,
+      files_changed: [],
+    };
+
+    await writeFile(exitFile, JSON.stringify(artifact, null, 2));
   }
 }
 

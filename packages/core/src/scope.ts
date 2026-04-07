@@ -126,16 +126,23 @@ export async function acquireCommitLock(
   }
 }
 
-/** 释放 commit 锁 */
-export async function releaseCommitLock(flooDir: string): Promise<void> {
+/** 释放 commit 锁（必须验证持有者身份，防止误删其他任务的锁） */
+export async function releaseCommitLock(flooDir: string, taskId: string): Promise<void> {
   const lockPath = join(flooDir, LOCK_FILE);
   try {
+    // 验证锁的持有者是否是当前任务
+    const content = await readFile(lockPath, 'utf-8');
+    const lock = JSON.parse(content) as CommitLock;
+    if (lock.task_id !== taskId) {
+      throw new Error(`Cannot release lock: held by task ${lock.task_id}, not ${taskId}`);
+    }
     await unlink(lockPath);
   } catch (err: unknown) {
     // 锁文件不存在也没关系（可能已被清理）
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw err;
+    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
     }
+    throw err;
   }
 }
 

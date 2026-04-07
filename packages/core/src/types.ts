@@ -165,8 +165,8 @@ export interface AgentAdapter {
   /** 向运行中的 session 发送消息 */
   sendMessage(sessionName: string, msg: string): Promise<void>;
 
-  /** 强制终止 session */
-  kill(sessionName: string): Promise<void>;
+  /** 强制终止 session 并写入 exit artifact（exit_code = -1 表示被终止） */
+  kill(sessionName: string, cwd: string, taskId: string, phase: string): Promise<void>;
 }
 
 // ============================================================
