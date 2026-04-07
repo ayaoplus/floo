@@ -1,0 +1,16 @@
+{
+  "name": "floo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Multi-Agent Vibe Coding Harness",
+  "workspaces": [
+    "packages/core",
+    "packages/cli",
+    "packages/web"
+  ],
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "typescript": "^6.0.2"
+  }
+}
