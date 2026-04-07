@@ -889,6 +889,11 @@ export async function createAndRun(
     const result = await runTask(mainTask, startPhase, opts);
     batch.status = result.status === 'completed' ? 'completed' : 'active';
     await saveBatch(flooDir, batch);
+    await notify(flooDir, 'batch_completed', {
+      batch_id: batchId, task_id: mainTask.id,
+      status: batch.status, total_tasks: 1,
+      completed: result.status === 'completed' ? 1 : 0, failed: result.status === 'failed' ? 1 : 0,
+    });
     return { batch, tasks: [result] };
   }
 

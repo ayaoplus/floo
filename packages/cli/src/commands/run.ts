@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, mkdir } from 'node:fs/promises';
+import { openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   createAndRun,
@@ -59,7 +60,7 @@ export const runCommand = new Command('run')
       // 重建完整命令：保留 argv[1]（CLI 入口脚本），去掉 --detach
       const args = process.argv.slice(1).filter(a => a !== '--detach');
       const logFile = join(logsDir, `run-${Date.now()}.log`);
-      const logFd = require('node:fs').openSync(logFile, 'a');
+      const logFd = openSync(logFile, 'a');
 
       const child = spawn(process.argv[0], args, {
         detached: true,
@@ -69,7 +70,7 @@ export const runCommand = new Command('run')
       child.unref();
 
       // 关闭父进程持有的 fd，让子进程独占
-      require('node:fs').closeSync(logFd);
+      closeSync(logFd);
 
       console.log(`后台任务已启动 (PID: ${child.pid})`);
       console.log(`日志: ${logFile}`);

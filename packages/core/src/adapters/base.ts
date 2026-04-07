@@ -161,9 +161,14 @@ if [ $EXIT_CODE -eq 0 ]; then
   done
   if [ -n "$FLOO_DIRTY" ]; then
     git add $FLOO_DIRTY
-    # 不用 || true — hook 失败（如编译门禁）应传播为非零 exit code
-    if ! git commit -m "[floo] auto-commit uncommitted changes for ${taskId}" 2>&1; then
-      echo "[floo] force-commit failed (possibly compile gate rejection)"
+    # 记录 commit 前的 HEAD，用于检测 post-commit hook 是否撤销了 commit
+    FLOO_PRE_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
+    git commit -m "[floo] auto-commit uncommitted changes for ${taskId}" 2>&1 || true
+    FLOO_POST_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
+    # post-commit hook（编译门禁）失败会 git reset --soft HEAD~1 撤销 commit
+    # 如果 HEAD 没有前进，说明 commit 被拒绝
+    if [ "$FLOO_PRE_COMMIT" = "$FLOO_POST_COMMIT" ]; then
+      echo "[floo] force-commit rejected by compile gate (HEAD unchanged)"
       EXIT_CODE=1
     fi
   fi
