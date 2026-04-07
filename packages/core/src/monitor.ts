@@ -127,13 +127,22 @@ export async function cancelTask(
     } catch { /* 可能没有需要回滚的变更 */ }
   }
 
-  // 更新状态
+  // 更新 task 状态
   task.status = 'cancelled';
   task.updated_at = new Date().toISOString();
   const taskDir = join(flooDir, 'batches', batchId, 'tasks', taskId);
-  await import('node:fs/promises').then(fs =>
-    fs.writeFile(join(taskDir, 'task.json'), JSON.stringify(task, null, 2)),
-  );
+  const { writeFile } = await import('node:fs/promises');
+  await writeFile(join(taskDir, 'task.json'), JSON.stringify(task, null, 2));
+
+  // 检查是否所有任务都已结束，更新 batch 状态
+  const tasks = await listTasks(flooDir, batchId);
+  const allDone = tasks.every(t => t.status === 'completed' || t.status === 'cancelled' || t.status === 'failed');
+  if (allDone) {
+    const batch = await getBatch(flooDir, batchId);
+    batch.status = 'cancelled';
+    batch.updated_at = new Date().toISOString();
+    await writeFile(join(flooDir, 'batches', batchId, 'batch.json'), JSON.stringify(batch, null, 2));
+  }
 
   return task;
 }

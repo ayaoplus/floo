@@ -28,10 +28,16 @@ export const runCommand = new Command('run')
   .action(async (description: string, options: { from?: string; scope?: string[] }) => {
     const cwd = process.cwd();
 
-    // Milestone 1 强约束：working tree 必须干净
+    // Milestone 1 强约束：working tree 必须干净（排除 floo 自身文件）
     try {
       const { stdout } = await exec('git', ['status', '--porcelain'], { cwd });
-      if (stdout.trim().length > 0) {
+      const dirtyFiles = stdout.trim().split('\n')
+        .filter(line => line.trim().length > 0)
+        .filter(line => {
+          const file = line.slice(3); // 去掉状态前缀如 "?? " 或 " M "
+          return !file.startsWith('.floo/') && file !== 'floo.config.json';
+        });
+      if (dirtyFiles.length > 0) {
         console.error('错误：working tree 不干净。请先 commit 或 stash 未提交的变更。');
         console.error('运行 `git status` 查看详情。');
         process.exit(1);
@@ -53,11 +59,17 @@ export const runCommand = new Command('run')
     }
     console.log('');
 
-    // 加载配置
+    // 加载配置（深度合并，用户只需覆盖想改的字段）
     let config: FlooConfig = DEFAULT_CONFIG;
     try {
       const configContent = await readFile(join(cwd, 'floo.config.json'), 'utf-8');
-      config = { ...DEFAULT_CONFIG, ...JSON.parse(configContent) };
+      const userConfig = JSON.parse(configContent);
+      config = {
+        roles: { ...DEFAULT_CONFIG.roles, ...userConfig.roles },
+        concurrency: { ...DEFAULT_CONFIG.concurrency, ...userConfig.concurrency },
+        session: { ...DEFAULT_CONFIG.session, ...userConfig.session },
+        protected_files: userConfig.protected_files ?? DEFAULT_CONFIG.protected_files,
+      };
     } catch { /* 使用默认配置 */ }
 
     // 初始化 adapters

@@ -6,8 +6,8 @@
 
 import { Command } from 'commander';
 import { join } from 'node:path';
-import { access } from 'node:fs/promises';
-import { getStatusSummary, checkTimeouts } from '@floo/core';
+import { access, readFile } from 'node:fs/promises';
+import { getStatusSummary, checkTimeouts, DEFAULT_CONFIG } from '@floo/core';
 
 export const monitorCommand = new Command('monitor')
   .description('实时监控任务状态')
@@ -46,9 +46,14 @@ export const monitorCommand = new Command('monitor')
         console.error('读取状态失败:', err instanceof Error ? err.message : err);
       }
 
-      // 检测超时任务（阈值 30 分钟）
+      // 检测超时任务（从配置读取阈值）
       try {
-        const timedOut = await checkTimeouts(flooDir, 30);
+        let timeoutMinutes = DEFAULT_CONFIG.session.timeout_minutes;
+        try {
+          const cfg = JSON.parse(await readFile(join(process.cwd(), 'floo.config.json'), 'utf-8'));
+          if (cfg.session?.timeout_minutes) timeoutMinutes = cfg.session.timeout_minutes;
+        } catch { /* 用默认值 */ }
+        const timedOut = await checkTimeouts(flooDir, timeoutMinutes);
         if (timedOut.length > 0) {
           console.log('\n⚠ 超时任务:');
           for (const t of timedOut) {
