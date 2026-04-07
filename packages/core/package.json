@@ -8,5 +8,8 @@
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch"
+  },
+  "dependencies": {
+    "yaml": "^2.8.3"
   }
 }

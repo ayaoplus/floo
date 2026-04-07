@@ -8,6 +8,7 @@ import { readFile, writeFile, mkdir, copyFile, access } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { parse as parseYaml } from 'yaml';
 import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
 import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
@@ -78,13 +79,10 @@ async function saveRun(flooDir: string, batchId: string, taskId: string, run: Ru
 // 工具函数
 // ============================================================
 
-/** 去掉 YAML 值的引号：`"foo"` → `foo`，`'bar'` → `bar` */
-function stripYamlQuotes(value: string): string {
-  if ((value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))) {
-    return value.slice(1, -1);
-  }
-  return value;
+/** 确保值是字符串数组（YAML 解析结果可能是各种类型） */
+function toStringArray(val: unknown): string[] {
+  if (Array.isArray(val)) return val.map(String);
+  return [];
 }
 
 // ============================================================
@@ -157,16 +155,6 @@ async function cleanStaleArtifact(projectRoot: string, phase: Phase, taskId: str
   } catch { /* 文件不存在，忽略 */ }
 }
 
-/** 从 YAML 列表块提取列表项 */
-function extractYamlList(block: string): string[] {
-  const items: string[] = [];
-  const matches = block.matchAll(/^\s+-\s+(.+)/gm);
-  for (const m of matches) {
-    items.push(stripYamlQuotes(m[1].trim()));
-  }
-  return items;
-}
-
 /** 解析后的子任务定义 */
 interface ParsedTask {
   id: string;
@@ -178,53 +166,72 @@ interface ParsedTask {
 }
 
 /**
- * 解析 plan.md 拆出多个子任务
- * 支持两种格式：
- * 1. 多任务 YAML（每个 task 有 id、description、scope 等）
- * 2. 单任务简单格式（只有 scope 和 acceptance_criteria，兼容 M1）
+ * 解析 plan.md 拆出多个子任务（使用 yaml 包解析）
+ * plan.md 中的 YAML 可能在 ```yaml 代码块内，也可能直接是纯 YAML
+ * 支持两种结构：
+ * 1. 多任务：{ tasks: [...] } 或顶层数组
+ * 2. 单任务：{ scope: [...], acceptance_criteria: [...] }
  */
 function parsePlanTasks(content: string): ParsedTask[] {
+  // 提取 ```yaml ... ``` 代码块，如果有的话
+  const codeBlockMatch = content.match(/```ya?ml\s*\n([\s\S]*?)```/);
+  const yamlContent = codeBlockMatch ? codeBlockMatch[1] : content;
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(yamlContent);
+  } catch {
+    // YAML 解析失败，返回空任务列表（兼容非 YAML 内容）
+    return [{
+      id: 'task-001', description: '', scope: [], acceptance_criteria: [],
+      review_level: 'full', depends_on: [],
+    }];
+  }
+
+  // 提取任务数组：支持 { tasks: [...] } 或直接 [...]
+  let rawTasks: unknown[];
+  if (parsed && typeof parsed === 'object' && 'tasks' in parsed && Array.isArray((parsed as Record<string, unknown>).tasks)) {
+    rawTasks = (parsed as Record<string, unknown>).tasks as unknown[];
+  } else if (Array.isArray(parsed)) {
+    rawTasks = parsed;
+  } else if (parsed && typeof parsed === 'object') {
+    // 单任务格式：直接用整个对象作为一个任务
+    rawTasks = [parsed];
+  } else {
+    return [{
+      id: 'task-001', description: '', scope: [], acceptance_criteria: [],
+      review_level: 'full', depends_on: [],
+    }];
+  }
+
   const tasks: ParsedTask[] = [];
+  for (const raw of rawTasks) {
+    if (!raw || typeof raw !== 'object') continue;
+    const t = raw as Record<string, unknown>;
 
-  // 尝试匹配多任务块：以 `- id:` 开头的 YAML 列表（支持缩进，如 `  - id:`）
-  const taskBlocks = content.split(/(?=^\s*-\s+id:\s*)/m).filter(b => b.trim().length > 0);
+    // 没有 id 的对象不是有效任务（可能是注释或其他结构）
+    if (!t.id && rawTasks.length > 1) continue;
 
-  for (const block of taskBlocks) {
-    const idMatch = block.match(/id:\s*["']?([^\s"']+)["']?/);
-    if (!idMatch) continue; // 不是任务块
-
-    const descMatch = block.match(/description:\s*["']?(.+?)["']?\s*$/m);
-    const scopeMatch = block.match(/scope:\s*\n((?:\s+-\s+.+\n?)+)/);
-    const criteriaMatch = block.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)+)/);
-    const levelMatch = block.match(/review_level:\s*["']?(full|scan|skip)["']?/i);
-    const depsMatch = block.match(/depends_on:\s*\n((?:\s+-\s+.+\n?)+)/);
-
+    const reviewLevel = String(t.review_level ?? 'full').toLowerCase();
     tasks.push({
-      id: stripYamlQuotes(idMatch[1]),
-      description: descMatch ? stripYamlQuotes(descMatch[1].trim()) : '',
-      scope: scopeMatch ? extractYamlList(scopeMatch[1]) : [],
-      acceptance_criteria: criteriaMatch ? extractYamlList(criteriaMatch[1]) : [],
-      review_level: levelMatch ? levelMatch[1].toLowerCase() as 'full' | 'scan' | 'skip' : 'full',
-      depends_on: depsMatch ? extractYamlList(depsMatch[1]) : [],
+      id: String(t.id ?? 'task-001'),
+      description: String(t.description ?? ''),
+      scope: toStringArray(t.scope),
+      acceptance_criteria: toStringArray(t.acceptance_criteria),
+      review_level: ['full', 'scan', 'skip'].includes(reviewLevel) ? reviewLevel as 'full' | 'scan' | 'skip' : 'full',
+      depends_on: toStringArray(t.depends_on),
     });
   }
 
-  // 兼容 M1 单任务格式：没找到多任务块，提取全局 scope/criteria
+  // 没有解析出任何任务，回退为单任务
   if (tasks.length === 0) {
-    const scope: string[] = [];
-    const scopeMatches = content.matchAll(/scope:\s*\n((?:\s+-\s+.+\n?)+)/g);
-    for (const m of scopeMatches) {
-      scope.push(...extractYamlList(m[1]));
-    }
-    const criteriaMatch = content.match(/acceptance_criteria:\s*\n((?:\s+-\s+.+\n?)+)/);
-    const levelMatch = content.match(/review_level:\s*["']?(full|scan|skip)["']?/i);
-
+    const obj = (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {};
     tasks.push({
       id: 'task-001',
       description: '',
-      scope,
-      acceptance_criteria: criteriaMatch ? extractYamlList(criteriaMatch[1]) : [],
-      review_level: levelMatch ? levelMatch[1].toLowerCase() as 'full' | 'scan' | 'skip' : 'full',
+      scope: toStringArray(obj.scope),
+      acceptance_criteria: toStringArray(obj.acceptance_criteria),
+      review_level: 'full',
       depends_on: [],
     });
   }
