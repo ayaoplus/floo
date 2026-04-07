@@ -678,9 +678,10 @@ async function runBatch(
       }
     }
 
-    // dispatch 所有可启动的任务
+    // dispatch 可启动的任务（受 max_agents 并发上限约束）
     const runningIds = new Set(running.keys());
     for (const [id, task] of pending) {
+      if (running.size >= config.concurrency.max_agents) break;
       if (canStart(task, runningIds)) {
         pending.delete(id);
         runningIds.add(id);

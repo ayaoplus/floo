@@ -89,40 +89,57 @@ export function findOutOfScope(filesChanged: string[], allowedScope: string[]): 
 
 const LOCK_FILE = 'commit.lock';
 
+/** 等待重试的默认配置 */
+const LOCK_RETRY_INTERVAL_MS = 1000;  // 每次重试间隔 1 秒
+const LOCK_MAX_WAIT_MS = 300_000;     // 最多等待 5 分钟
+
 /**
- * 获取 commit 锁
- * 使用 wx flag（exclusive create）保证原子性：文件已存在则抛错
+ * 获取 commit 锁（带等待重试）
+ * 使用 wx flag（exclusive create）保证原子性
+ * 锁被占用时会等待重试，而不是直接抛错
+ * @param maxWaitMs 最大等待时间，0 表示不等待（立刻抛错），默认 5 分钟
  */
 export async function acquireCommitLock(
   flooDir: string,
   taskId: string,
   sessionName: string,
+  maxWaitMs: number = LOCK_MAX_WAIT_MS,
 ): Promise<void> {
   const lockPath = join(flooDir, LOCK_FILE);
+  const deadline = Date.now() + maxWaitMs;
 
-  const lock: CommitLock = {
-    task_id: taskId,
-    session_name: sessionName,
-    acquired_at: new Date().toISOString(),
-    pid: process.pid,
-  };
+  while (true) {
+    const lock: CommitLock = {
+      task_id: taskId,
+      session_name: sessionName,
+      acquired_at: new Date().toISOString(),
+      pid: process.pid,
+    };
 
-  try {
-    // wx = write + exclusive：文件存在则报 EEXIST
-    await writeFile(lockPath, JSON.stringify(lock, null, 2), { flag: 'wx' });
-  } catch (err: unknown) {
-    if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'EEXIST') {
-      // 锁已被占用，检查是否是死锁（持有者进程已经不在了）
-      const stale = await isLockStale(lockPath);
-      if (stale) {
-        // 死锁清理：删除旧锁，重新获取
-        await unlink(lockPath);
-        await writeFile(lockPath, JSON.stringify(lock, null, 2), { flag: 'wx' });
-        return;
+    try {
+      // wx = write + exclusive：文件存在则报 EEXIST
+      await writeFile(lockPath, JSON.stringify(lock, null, 2), { flag: 'wx' });
+      return; // 获取成功
+    } catch (err: unknown) {
+      if (err instanceof Error && 'code' in err && (err as NodeJS.ErrnoException).code === 'EEXIST') {
+        // 锁已被占用，检查是否过期（持有者进程已不在）
+        const stale = await isLockStale(lockPath);
+        if (stale) {
+          await unlink(lockPath);
+          continue; // 清理后立即重试
+        }
+
+        // 锁有效，检查是否超时
+        if (Date.now() >= deadline) {
+          throw new Error(`Commit lock held by task ${await getLockHolder(lockPath)}${maxWaitMs > 0 ? ` (waited ${maxWaitMs / 1000}s)` : ''}`);
+        }
+
+        // 等待后重试
+        await new Promise(r => setTimeout(r, LOCK_RETRY_INTERVAL_MS));
+        continue;
       }
-      throw new Error(`Commit lock held by task ${await getLockHolder(lockPath)}`);
+      throw err;
     }
-    throw err;
   }
 }
 

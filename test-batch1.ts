@@ -125,11 +125,12 @@ await acquireCommitLock(testDir, 'T001', 'floo-T001-coder');
 assert(true, '锁获取成功');
 
 // 重复获取应该失败（同一进程持有，PID 检查会认为非 stale）
+// maxWaitMs=0 表示不等待，立即报错
 try {
-  await acquireCommitLock(testDir, 'T002', 'floo-T002-coder');
+  await acquireCommitLock(testDir, 'T002', 'floo-T002-coder', 0);
   assert(false, '重复获取锁应该抛错');
 } catch (err) {
-  assert(String(err).includes('Commit lock held'), '重复获取锁正确��错');
+  assert(String(err).includes('Commit lock held'), '重复获取锁正确报错');
 }
 
 // 释放锁
