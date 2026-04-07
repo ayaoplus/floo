@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "test": "tsx test-batch1.ts",
-    "build": "tsc -b packages/core packages/cli"
+    "build": "tsc -b packages/core"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",

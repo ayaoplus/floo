@@ -474,7 +474,6 @@ concurrency:
   max_agents: 3
   commit_lock: true
 
-# session 生命周期
 # session 生命周期（单位：分钟）
 session:
   timeout_minutes: 30

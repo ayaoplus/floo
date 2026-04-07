@@ -52,21 +52,29 @@ async function sendKeys(name: string, keys: string): Promise<void> {
  * kill() 调用时用，因为此时没有 BASE_HEAD 信息，只能看当前状态
  */
 async function collectChangedFiles(cwd: string): Promise<string[]> {
+  const files: string[] = [];
+
+  // staged + unstaged（新仓库无 commit 时 HEAD 不存在，会失败，单独 catch）
   try {
-    // staged + unstaged
-    const { stdout: diffOut } = await exec('git', ['diff', '--name-only', 'HEAD'], { cwd });
-    // untracked
-    const { stdout: untrackedOut } = await exec(
+    const { stdout } = await exec('git', ['diff', '--name-only', 'HEAD'], { cwd });
+    files.push(...stdout.split('\n'));
+  } catch {
+    // 无 HEAD（新仓库），尝试列出 staged 文件
+    try {
+      const { stdout } = await exec('git', ['diff', '--name-only', '--cached'], { cwd });
+      files.push(...stdout.split('\n'));
+    } catch { /* ignore */ }
+  }
+
+  // untracked 文件（独立获取，不受 HEAD 影响）
+  try {
+    const { stdout } = await exec(
       'git', ['ls-files', '--others', '--exclude-standard'], { cwd },
     );
-    const all = `${diffOut}\n${untrackedOut}`
-      .split('\n')
-      .map(f => f.trim())
-      .filter(f => f.length > 0);
-    return [...new Set(all)];
-  } catch {
-    return [];
-  }
+    files.push(...stdout.split('\n'));
+  } catch { /* ignore */ }
+
+  return [...new Set(files.map(f => f.trim()).filter(f => f.length > 0))];
 }
 
 /** 安全删除文件（不存在时不报错） */
