@@ -1,10 +1,12 @@
-<div align="right">
+<div align="left">
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
 </div>
 
 <div align="center">
+
+<img src="./docs/img/logo.png" alt="Floo" width="480" />
 
 # Floo
 
