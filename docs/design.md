@@ -19,10 +19,7 @@
 
 ### 系统三层架构
 
-```
-用户 ↔ 任意 agent (CC/Codex/OpenClaw) ↔ Floo CLI/API ↔ 调度系统 ↔ 工作 agent
-         交互层                              编排层              执行层
-```
+![系统三层架构](./img/arch-overview.png)
 
 Floo 本身是**无头的编排层**，不绑定任何交互方式。谁调用 CLI 谁就是交互层。
 可以是 Telegram 上的 OpenClaw，也可以是本地终端的 Claude Code。
@@ -130,11 +127,8 @@ roles:
 ```
 
 批次完整生命周期：
-```
-用户提需求 → Designer → Planner → [Coder × N] → 任务级 Review → Tester
-  → 整体 Review（只读报告）→ 提交给用户 → 批次关闭
-  → 用户有修改意见 → 开新批次
-```
+
+![批次完整生命周期](./img/batch-lifecycle.png)
 
 ---
 
@@ -174,7 +168,7 @@ tmux wait-for -S "floo-${TASK_ID}-${PHASE}-done"
 
 **核心用 `tmux wait-for` 做 agent 完成回调（零延迟），等价于 agent-swarm 的 `on-complete.sh`。**
 
-![Floo 事件驱动回调机制](./callback-mechanism.png)
+![Floo 事件驱动回调机制](./img/callback-mechanism.png)
 
 完整链路：
 
@@ -249,6 +243,8 @@ interface SpawnOptions {
 
 ### 1. 隔离策略：主分支 + scope 锁
 
+![并行调度与 Scope 隔离](./img/parallel-scheduling.png)
+
 不使用 worktree。所有 agent 在主分支上工作，通过 scope（文件列表）避免冲突。
 
 - **Milestone 1 强约束**：`floo run` 启动前检查 `git status --porcelain`，working tree 不干净则拒绝启动；单任务独占仓库
@@ -264,6 +260,8 @@ Coder 完成后检查 `git diff --name-only` vs scope：
 - 越界文件有冲突 → 整个任务回退重新编排
 
 ### 3. 调度实现：状态机 80% + agent 20%
+
+![任务状态机](./img/task-state-machine.png)
 
 **正常流转（状态机，JS 硬编码）：**
 ```
