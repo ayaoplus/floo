@@ -8,6 +8,7 @@ import { writeFile, readFile, readdir, copyFile, mkdir, access, chmod } from 'no
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { symlink } from 'node:fs/promises';
 import { ensureFlooDir, DEFAULT_CONFIG } from '@floo/core';
 
 /**
@@ -137,7 +138,45 @@ export const initCommand = new Command('init')
       console.log('  警告：无法安装 git hook（可能不是 git 仓库）');
     }
 
-    // 6. 可选：安装 Playwright 并配置 E2E 测试
+    // 6. 安装 floo SKILL.md 到 agent 发现目录
+    // 让 Claude Code、Codex、OpenClaw 等 agent 自动感知 floo 的存在
+    const skillSrc = join(flooRoot, 'agent-skill', 'SKILL.md');
+    try {
+      await access(skillSrc);
+
+      // 安装到各 agent 的 skill 发现目录
+      const skillTargets = [
+        join(cwd, '.agents', 'skills', 'floo'),   // Codex / OpenClaw
+        join(cwd, '.claude', 'skills', 'floo'),   // Claude Code
+      ];
+
+      let installed = 0;
+      for (const targetDir of skillTargets) {
+        await mkdir(targetDir, { recursive: true });
+        const destSkillMd = join(targetDir, 'SKILL.md');
+        try {
+          await access(destSkillMd);
+          // 已存在，跳过（用户可能已定制）
+        } catch {
+          // 尝试创建符号链接，失败时 fallback 到复制
+          try {
+            await symlink(skillSrc, destSkillMd);
+          } catch {
+            await copyFile(skillSrc, destSkillMd);
+          }
+          installed++;
+        }
+      }
+      if (installed > 0) {
+        console.log(`✓ 安装 floo SKILL.md 到 .agents/skills/floo/ 和 .claude/skills/floo/`);
+      } else {
+        console.log(`  floo SKILL.md 已存在，跳过`);
+      }
+    } catch {
+      console.log('  警告：找不到 agent-skill/SKILL.md，跳过 skill 安装');
+    }
+
+    // 7. 可选：安装 Playwright 并配置 E2E 测试
     if (options.withPlaywright) {
       console.log('\n安装 Playwright...');
       const { execSync } = await import('node:child_process');
