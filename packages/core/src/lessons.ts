@@ -128,9 +128,10 @@ export async function addLesson(flooDir: string, lesson: Lesson): Promise<string
 
   const date = datePrefix();
   const slug = slugify(lesson.problem);
-  // 加时间戳后缀（HHmmss）防止同日同 slug 覆盖，中文问题 slug 为空时也能唯一
+  // 时间戳 + 4 位随机数，确保同秒内多次调用也不会覆盖
   const timeSuffix = new Date().toISOString().slice(11, 19).replace(/:/g, '');
-  const id = `${date}-${timeSuffix}-${slug}`;
+  const rand = String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+  const id = `${date}-${timeSuffix}-${rand}-${slug}`;
   const filename = `${id}.md`;
 
   await writeFile(join(dir, filename), formatLesson(lesson));

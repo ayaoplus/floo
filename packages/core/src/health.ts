@@ -32,26 +32,28 @@ export interface HealthReport {
  * 只处理当前 flooDir 管辖的任务，不触碰其他项目或外部创建的 session
  */
 export async function cleanOrphanSessions(flooDir: string): Promise<string[]> {
-  // 收集当前项目所有任务（含已结束的）的 session name
-  const knownSessions = new Map<string, boolean>(); // session name → 是否仍 running
+  // 收集当前项目所有 session name 及其状态
+  // 关键：同名 session（如不同 batch 的 task-001）可能一个在跑一个已结束
+  // 用 Set 分别记录：任何 batch 中有 running 的就保留，绝不误杀
+  const runningSessions = new Set<string>();   // 至少有一个 batch 中仍在跑
+  const finishedSessions = new Set<string>();  // 某个 batch 中已结束
   const batches = await listBatches(flooDir);
   for (const batch of batches) {
     const tasks = await listTasks(flooDir, batch.id);
     for (const task of tasks) {
-      if (!task.current_phase && task.status !== 'running') {
-        // 已结束的任务：从 runs 记录中提取历史 session name
-        // 用 task.id 构建可能的 session name 前缀
-        // 安全做法：只标记已知的 phase 名
+      if (task.status === 'running' && task.current_phase) {
+        runningSessions.add(`floo-${task.id}-${task.current_phase}`);
+      } else if (task.status !== 'running') {
         for (const phase of ['designer', 'planner', 'coder', 'reviewer', 'tester']) {
-          knownSessions.set(`floo-${task.id}-${phase}`, false);
+          finishedSessions.add(`floo-${task.id}-${phase}`);
         }
-      } else if (task.status === 'running' && task.current_phase) {
-        knownSessions.set(`floo-${task.id}-${task.current_phase}`, true);
       }
     }
   }
 
-  if (knownSessions.size === 0) return [];
+  // 候选清理集合：已结束且不在任何 batch 的 running 中
+  const candidates = new Set([...finishedSessions].filter(s => !runningSessions.has(s)));
+  if (candidates.size === 0) return [];
 
   // 获取当前存活的 tmux session
   let aliveSessions: Set<string>;
@@ -62,11 +64,10 @@ export async function cleanOrphanSessions(flooDir: string): Promise<string[]> {
     return []; // tmux 服务未运行
   }
 
-  // 只清理：属于当前项目 + 任务已非 running + tmux session 仍存活
+  // 只清理：候选集合中且 tmux session 仍存活的
   const cleaned: string[] = [];
-  for (const [name, isRunning] of knownSessions) {
-    if (isRunning) continue;             // 仍在运行，不碰
-    if (!aliveSessions.has(name)) continue; // session 已经退出了，无需清理
+  for (const name of candidates) {
+    if (!aliveSessions.has(name)) continue;
 
     try {
       await exec('tmux', ['kill-session', '-t', name]);
