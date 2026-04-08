@@ -50,7 +50,15 @@
 
 ## 快速开始
 
-**第一步 — 安装**
+**第零步 — 让你的 agent 来做**
+
+直接告诉你的 agent（Claude Code、Codex 等）：
+
+> 下载并配置这个项目：https://github.com/ayaoplus/floo
+
+它会搞定剩下的事。
+
+**第一步 — 手动安装（备选）**
 
 ```bash
 git clone https://github.com/ayaoplus/floo.git

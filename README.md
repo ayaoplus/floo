@@ -50,7 +50,15 @@
 
 ## Quick Start
 
-**Step 1 — Install**
+**Step 0 — Let your agent do it**
+
+Just tell your agent (Claude Code, Codex, etc.):
+
+> Download and set up this project: https://github.com/ayaoplus/floo
+
+It will handle the rest.
+
+**Step 1 — Install manually (alternative)**
 
 ```bash
 git clone https://github.com/ayaoplus/floo.git
