@@ -631,22 +631,34 @@ export async function runTask(
     if (phase === 'coder') {
       const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
 
-      // 1. Scope violation 检测：agent 是否修改了 scope 外的文件
-      const outOfScope = findOutOfScope(exitArtifact.files_changed, task.scope);
-      if (outOfScope.length > 0) {
-        // 只记日志，不自动扩展 scope——并行场景下 outOfScope 含其他任务的文件，扩展会污染
-        await log(flooDir, 'scope-violation', { task: task.id, files: outOfScope });
-      }
-
-      // 2. Protected files 检测：agent 是否修改了受保护文件
+      // 1. Protected files 检测：无论 scope 如何，修改受保护文件一律 fail
       const protectedHits = exitArtifact.files_changed.filter(
         f => config.protected_files.some(p => f === p || f.endsWith('/' + p)),
       );
       if (protectedHits.length > 0) {
         await log(flooDir, 'protected-file-violation', { task: task.id, files: protectedHits });
+        task.status = 'failed';
+        task.current_phase = phase;
+        await saveTask(flooDir, task);
+        await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'protected_file_violation' });
+        return task;
       }
 
-      // 2. 过滤 exit artifact：只保留本任务 scope 内的文件，排除并行任务的噪声
+      // 2. Scope violation 检测：有明确 scope 时越界即 fail（scope 是约束，不是建议）
+      //    空 scope = 用户未指定约束，跳过检测
+      if (task.scope.length > 0) {
+        const outOfScope = findOutOfScope(exitArtifact.files_changed, task.scope);
+        if (outOfScope.length > 0) {
+          await log(flooDir, 'scope-violation', { task: task.id, files: outOfScope });
+          task.status = 'failed';
+          task.current_phase = phase;
+          await saveTask(flooDir, task);
+          await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'scope_violation', files: outOfScope });
+          return task;
+        }
+      }
+
+      // 3. 过滤 exit artifact：只保留本任务 scope 内的文件，排除并行任务的噪声
       //    写回 .exit 文件，确保下游消费者（reviewer diff 等）看到干净数据
       const rawCount = exitArtifact.files_changed.length;
       const taskFiles = exitArtifact.files_changed.filter(

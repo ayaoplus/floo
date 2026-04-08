@@ -102,6 +102,12 @@ const conflicts = detectConflicts([
 assert(conflicts.length === 1, '三任务中只有 T1↔T3 冲突');
 assert(conflicts[0]?.task_a === 'T1' && conflicts[0]?.task_b === 'T3', '冲突对正确');
 
+// 空 scope 视为冲突（不确定改什么 → 强制串行）
+const overlap4 = scopesOverlap([], ['src/api/']);
+assert(overlap4.length > 0, '空 scope 与任何 scope 冲突');
+const overlap5 = scopesOverlap([], []);
+assert(overlap5.length > 0, '两个空 scope 也冲突');
+
 // 越界检测
 const outOfScope = findOutOfScope(
   ['src/api/health.ts', 'src/web/index.ts', 'README.md'],

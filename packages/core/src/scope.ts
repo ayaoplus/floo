@@ -16,6 +16,11 @@ import type { ScopeConflict, CommitLock } from './types.js';
  * scope 项可以是文件路径或目录路径（以 / 结尾表示目录前缀匹配）
  */
 export function scopesOverlap(scopeA: string[], scopeB: string[]): string[] {
+  // 空 scope = 未指定约束，可能改任何文件 → 和任何任务都视为冲突（强制串行）
+  if (scopeA.length === 0 || scopeB.length === 0) {
+    return ['(empty scope)'];
+  }
+
   const overlapping: string[] = [];
 
   for (const a of scopeA) {
