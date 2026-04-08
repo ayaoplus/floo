@@ -45,3 +45,9 @@ export {
 
 // Notifications
 export { notify, listNotifications, type NotificationFilter } from './notifications.js';
+
+// Health checks
+export { cleanOrphanSessions, detectStaleTasks, rotateLogs, runHealthCheck, type HealthReport } from './health.js';
+
+// Lessons
+export { addLesson, extractLesson, listLessons, distillRules, type Lesson, type LessonRecord } from './lessons.js';
