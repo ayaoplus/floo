@@ -15,7 +15,7 @@
 
 *将 Claude Code、Codex 等多个 AI agent 通过结构化流水线协调起来——并行执行、交叉审核、自动重试、零轮询回调。*
 
-[快速开始](#快速开始) · [工作原理](#工作原理) · [命令](#命令) · [环境要求](#环境要求)
+[快速开始](#快速开始) · [命令](#命令) · [工作原理](#工作原理) · [环境要求](#环境要求)
 
 </div>
 
@@ -72,6 +72,22 @@ floo monitor          # 实时进度流
 
 ---
 
+## 命令
+
+| 命令 | 说明 |
+|------|------|
+| `floo init` | 在当前项目中初始化 floo |
+| `floo init --with-playwright` | 同时安装 Playwright 用于 E2E 测试 |
+| `floo run "<描述>"` | 启动一个完整流水线任务 |
+| `floo run "<描述>" --detach` | 后台运行，立即返回 |
+| `floo status` | 查看当前批次和任务状态快照 |
+| `floo monitor` | 实时通知流 |
+| `floo cancel <batch-id>` | 取消运行中的批次 |
+| `floo learn` | 查看历次运行积累的经验 |
+| `floo sync` | 同步 skill 模板和配置到最新版本 |
+
+---
+
 ## 工作原理
 
 ![Floo 流水线工作原理](./docs/img/how-it-works.png)
@@ -109,22 +125,6 @@ floo monitor          # 实时进度流
   }
 }
 ```
-
----
-
-## 命令
-
-| 命令 | 说明 |
-|------|------|
-| `floo init` | 在当前项目中初始化 floo |
-| `floo init --with-playwright` | 同时安装 Playwright 用于 E2E 测试 |
-| `floo run "<描述>"` | 启动一个完整流水线任务 |
-| `floo run "<描述>" --detach` | 后台运行，立即返回 |
-| `floo status` | 查看当前批次和任务状态快照 |
-| `floo monitor` | 实时通知流 |
-| `floo cancel <batch-id>` | 取消运行中的批次 |
-| `floo learn` | 查看历次运行积累的经验 |
-| `floo sync` | 同步 skill 模板和配置到最新版本 |
 
 ---
 

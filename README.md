@@ -15,7 +15,7 @@
 
 *Coordinate Claude Code, Codex, and other AI agents through a structured pipeline — parallel execution, cross-review, automatic retry, zero polling.*
 
-[Quick Start](#quick-start) · [How It Works](#how-it-works) · [Commands](#commands) · [Requirements](#requirements)
+[Quick Start](#quick-start) · [Commands](#commands) · [How It Works](#how-it-works) · [Requirements](#requirements)
 
 </div>
 
@@ -72,6 +72,22 @@ floo monitor          # live progress feed
 
 ---
 
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `floo init` | Initialize floo in the current project |
+| `floo init --with-playwright` | Also install Playwright for E2E testing |
+| `floo run "<description>"` | Run a new task through the full pipeline |
+| `floo run "<description>" --detach` | Run in background, return immediately |
+| `floo status` | Snapshot of current batch and task states |
+| `floo monitor` | Live notification stream |
+| `floo cancel <batch-id>` | Cancel a running batch |
+| `floo learn` | Display accumulated lessons from past runs |
+| `floo sync` | Sync skill templates and config to latest version |
+
+---
+
 ## How It Works
 
 ![Floo pipeline how it works](./docs/img/how-it-works.png)
@@ -109,22 +125,6 @@ Default bindings (override in `floo.config.json`):
   }
 }
 ```
-
----
-
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `floo init` | Initialize floo in the current project |
-| `floo init --with-playwright` | Also install Playwright for E2E testing |
-| `floo run "<description>"` | Run a new task through the full pipeline |
-| `floo run "<description>" --detach` | Run in background, return immediately |
-| `floo status` | Snapshot of current batch and task states |
-| `floo monitor` | Live notification stream |
-| `floo cancel <batch-id>` | Cancel a running batch |
-| `floo learn` | Display accumulated lessons from past runs |
-| `floo sync` | Sync skill templates and config to latest version |
 
 ---
 
