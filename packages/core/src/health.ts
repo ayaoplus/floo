@@ -4,7 +4,7 @@
  */
 
 import { writeFile, rename, unlink, stat } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve, basename } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { listBatches, listTasks } from './monitor.js';
@@ -35,8 +35,12 @@ export interface HealthReport {
  * 绝不碰其他项目碰巧同名的 session。
  */
 export async function cleanOrphanSessions(flooDir: string): Promise<string[]> {
-  // projectRoot = flooDir 去掉末尾的 .floo
-  const projectRoot = join(flooDir, '..');
+  // flooDir 应该是 {projectRoot}/.floo，用 resolve 获取绝对路径后取父目录
+  const resolved = resolve(flooDir);
+  if (basename(resolved) !== '.floo') {
+    return []; // flooDir 格式不符合预期，安全退出
+  }
+  const projectRoot = resolve(resolved, '..');
 
   // 收集当前项目仍在 running 的 session name
   const runningSessions = new Set<string>();
