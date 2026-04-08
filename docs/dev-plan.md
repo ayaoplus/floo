@@ -147,17 +147,17 @@ floo run "重构支付模块"
 
 ---
 
-## Batch 7：Tester 角色 + 整体 Review
+## Batch 7：Tester 角色 + 整体 Review ✅
 
 > 核心目标：在 reviewer 之后加 tester 阶段，批次完成后做整体 review 报告。
 
-| # | 文件 | 说明 |
+| # | 文件 | 状态 |
 |---|------|------|
-| 7.1 | `skills/tester.md` | Tester skill 模板（Playwright 规范：getByRole 定位、截图证据） |
-| 7.2 | `packages/core/src/types.ts` | PHASE_ORDER 加入 tester |
-| 7.3 | `packages/core/src/dispatcher.ts` | tester phase 逻辑：test fail → 回 coder |
-| 7.4 | `packages/cli/src/commands/init.ts` | `floo init --with-playwright` 可选安装 |
-| 7.5 | `packages/core/src/dispatcher.ts` | 批次完成后触发整体 review：只读报告，不修改代码 |
+| 7.1 | `skills/tester.md` | ✅ |
+| 7.2 | `packages/core/src/types.ts` | ✅ |
+| 7.3 | `packages/core/src/dispatcher.ts` | ✅ |
+| 7.4 | `packages/cli/src/commands/init.ts` | ✅ |
+| 7.5 | `packages/core/src/dispatcher.ts` | ✅ |
 
 ---
 
@@ -219,8 +219,8 @@ floo run "重构支付模块"
 
 ### M2 需要补充的测试
 
-- [ ] 多任务并行 dispatch + scope 冲突检测
-- [ ] commit 锁并发场景
+- [x] 多任务并行 dispatch + scope 冲突检测（scopesOverlap / detectConflicts / findOutOfScope）
+- [x] commit 锁并发场景（基础 acquire/release/reentrant 已覆盖，真并发未测）
 - [ ] force-commit 兜底
 - [ ] post-commit hook 编译门禁（通过 + 失败两条路径）
 - [ ] `--detach` 后台模式 + notification 文件生成
