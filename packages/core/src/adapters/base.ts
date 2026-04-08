@@ -386,6 +386,12 @@ export abstract class BaseAdapter implements AgentAdapter {
     };
 
     await writeFile(exitFile, JSON.stringify(artifact, null, 2));
+
+    // 发 wait-for 信号，唤醒阻塞在 waitForCompletion 的 dispatcher
+    // 不发信号的话 dispatcher 会永远卡在 tmux wait-for 上
+    try {
+      await tmux('wait-for', '-S', `${sessionName}-done`);
+    } catch { /* tmux server 可能已退出 */ }
   }
 }
 
