@@ -40,7 +40,7 @@ export interface RoleBinding {
   model: string;
 }
 
-/** floo.config.yaml 的完整结构 */
+/** floo.config.json 的完整结构 */
 export interface FlooConfig {
   roles: Record<Phase, RoleBinding>;
   concurrency: {

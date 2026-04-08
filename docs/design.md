@@ -38,14 +38,17 @@ floo/
 │   │       ├── types.ts              # 所有类型定义
 │   │       ├── dispatcher.ts         # 调度器（核心：状态机 + on-complete + dispatch）
 │   │       ├── adapters/
-│   │       │   ├── base.ts           # AgentAdapter 接口 + tmux 操作
+│   │       │   ├── base.ts           # AgentAdapter 基类 + tmux 操作 + floo-runner
 │   │       │   ├── claude.ts         # Claude Code adapter
 │   │       │   └── codex.ts          # Codex adapter
 │   │       ├── skills/
 │   │       │   └── loader.ts         # 加载 markdown skill 模板
-│   │       ├── monitor.ts            # 状态监控（tmux/git/PR/CI 检查）
+│   │       ├── monitor.ts            # 状态监控（批次/任务查询、取消、超时检测）
 │   │       ├── router.ts             # 任务自动路由（判断从哪个阶段开始）
-│   │       └── scope.ts             # scope 冲突检测 + commit 锁
+│   │       ├── scope.ts              # scope 冲突检测 + commit 锁
+│   │       ├── notifications.ts      # 通知文件输出（.floo/notifications/）
+│   │       ├── health.ts             # 健康检查（孤儿 session、stale task、日志轮转）
+│   │       └── lessons.ts            # 经验积累（lesson 记录、提取、规则提炼）
 │   ├── cli/                          # CLI 入口
 │   │   └── src/
 │   │       ├── index.ts
@@ -56,24 +59,16 @@ floo/
 │   │           ├── cancel.ts         # floo cancel <taskId>
 │   │           ├── learn.ts          # floo learn "经验描述"
 │   │           ├── sync.ts           # floo sync (配置同步)
-│   │           ├── init.ts           # floo init
-│   │           └── serve.ts          # floo serve (Web UI)
-│   └── web/                          # Next.js 监控面板
-│       └── src/
-│           └── app/
-│               ├── page.tsx          # 任务列表
-│               ├── tasks/[id]/       # 任务详情
-│               └── sessions/         # tmux session 状态面板
+│   │           └── init.ts           # floo init
+│   └── web/                          # 监控面板（M4 实现，当前占位）
 ├── skills/                           # 默认 skill 模板（精心调试，核心竞争力）
 │   ├── designer.md
 │   ├── planner.md
 │   ├── coder.md
 │   ├── reviewer.md
-│   ├── tester.md
-│   └── house-elf.md                  # 系统运维角色
+│   └── tester.md
 └── templates/                        # 初始化模板
-    ├── claude.md.tmpl                # CLAUDE.md 模板
-    └── agents.md.tmpl                # AGENTS.md 模板
+    └── post-commit.sh                # git post-commit hook（编译门禁）
 ```
 
 ---
@@ -219,16 +214,32 @@ session_lifecycle:
 ```typescript
 interface AgentAdapter {
   runtime: 'claude' | 'codex';
-  spawn(opts: {
-    prompt: string;
-    cwd: string;
-    sessionName: string;
-    model?: string;
-  }): Promise<void>;                  // 只启动，不等待
 
+  /** 启动 agent（通过 floo-runner 包装），返回 tmux session 名 */
+  spawn(opts: SpawnOptions): Promise<string>;
+
+  /** 检查 session 是否还活着 */
   isAlive(sessionName: string): Promise<boolean>;
-  getOutput(sessionName: string): Promise<string>;
-  sendMessage(sessionName: string, msg: string): Promise<void>;  // mid-task redirect
+
+  /** 获取 session 输出（最后 N 行） */
+  getOutput(sessionName: string, lines?: number): Promise<string>;
+
+  /** 向运行中的 session 发送消息 */
+  sendMessage(sessionName: string, msg: string): Promise<void>;
+
+  /** 强制终止 session 并写入 exit artifact */
+  kill(sessionName: string, cwd: string, taskId: string, phase: string): Promise<void>;
+}
+
+interface SpawnOptions {
+  taskId: string;
+  phase: Phase;
+  prompt: string;
+  cwd: string;
+  runtime: Runtime;
+  model: string;
+  commitLock?: boolean;   // 启用 git 写操作序列化
+  scope?: string[];       // 任务允许修改的文件/目录列表
 }
 ```
 
@@ -621,27 +632,27 @@ Tester skill 模板包含 Playwright 规范：
 19. 任务列表 + 任务详情 + tmux Session 面板
 20. Hono HTTP server (`packages/cli/src/commands/serve.ts`)
 
-### Milestone 1 不做
+### Milestone 1 不做（后续里程碑实现情况）
 
-- ❌ 多任务并行（先跑通单任务全流程）
-- ❌ Tester 角色（先验证核心链路）
-- ❌ 整体 Review（需要先有批次）
-- ❌ house-elf（lessons/sync 等）
-- ❌ OpenClaw adapter
-- ❌ 实时 WebSocket/SSE
-- ❌ 通知文件输出（.floo/notifications/，由调用方读取转发）
+- ✅ 多任务并行（M2 Batch 4 实现）
+- ✅ Tester 角色（M2 Batch 7 实现）
+- ✅ 整体 Review（M2 Batch 7 实现）
+- ✅ house-elf（M3 Batch 8 实现：lessons、配置同步、健康检查）
+- ✅ 通知文件输出（M2 Batch 6 实现）
+- ❌ OpenClaw adapter（M4 Batch 11）
+- ❌ 实时 WebSocket/SSE（M4）
 - ❌ Token 消耗追踪
 
-### Milestone 2 方向
+### Milestone 2 已完成
 
-- 多任务并行调度 + scope 冲突检测
-- Tester 角色 + Playwright 集成
-- 批次管理 + 整体 Review
-- house-elf（lessons、配置同步、健康检查）
-- 通知系统
-- `floo learn` + `floo sync`
-- **post-commit 编译门禁**：`floo init` 安装 git hook，agent commit 时自动跑 `tsc --noEmit`，失败则 `git reset --soft` 让 agent 继续修
-- **dispatch heartbeat**：agent 运行期间每 5 分钟刷新 updated_at，health-check 15 分钟无更新报警
+- ✅ 多任务并行调度 + scope 冲突检测
+- ✅ Tester 角色
+- ✅ 批次管理 + 整体 Review
+- ✅ house-elf（lessons、配置同步、健康检查）
+- ✅ 通知系统
+- ✅ `floo learn` + `floo sync`
+- ✅ **post-commit 编译门禁**：`floo init` 安装 git hook，agent commit 时自动跑 `tsc --noEmit`，失败则 `git reset --soft` 让 agent 继续修
+- ✅ **dispatch heartbeat**：agent 运行期间每 5 分钟刷新 updated_at，health-check 15 分钟无更新报警
 
 ---
 
@@ -658,8 +669,11 @@ Tester skill 模板包含 Playwright 规范：
 ## 关键文件
 
 - `packages/core/src/dispatcher.ts` — 核心调度逻辑（状态机 + on-complete + dispatch）
-- `packages/core/src/adapters/base.ts` — agent 适配器接口 + tmux 操作
-- `packages/core/src/monitor.ts` — 监控（tmux wait-for 回调 + 轮询）
+- `packages/core/src/adapters/base.ts` — agent 适配器基类 + tmux 操作 + floo-runner 生成
+- `packages/core/src/monitor.ts` — 状态查询（批次/任务查询、取消、超时检测）
 - `packages/core/src/scope.ts` — scope 冲突检测 + commit 锁
 - `packages/core/src/router.ts` — 任务自动路由
+- `packages/core/src/notifications.ts` — 通知文件输出
+- `packages/core/src/health.ts` — 健康检查（孤儿 session 清理、stale task、日志轮转）
+- `packages/core/src/lessons.ts` — 经验系统（lesson 记录/提取/规则提炼）
 - `skills/*.md` — skill 模板（核心竞争力）
