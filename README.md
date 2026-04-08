@@ -52,19 +52,7 @@ floo monitor          # live progress feed
 
 ## How It Works
 
-```
-User describes task
-  │
-  ├─ Designer  →  requirements + scope definition  (design.md)
-  ├─ Planner   →  task decomposition               (plan.md YAML)
-  │
-  ├─ Scope-isolated parallel execution
-  │   ├─ task-001: Coder → Reviewer → Tester  ✓
-  │   ├─ task-002: Coder → Reviewer → Tester  ✓
-  │   └─ task-003: waits for task-001 → Coder → Reviewer → Tester  ✓
-  │
-  └─ Summary Review  (read-only batch report)
-```
+![Floo pipeline how it works](./docs/img/how-it-works.png)
 
 **Failure handling**
 | Situation | Behavior |

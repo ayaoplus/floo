@@ -52,19 +52,7 @@ floo monitor          # 实时进度流
 
 ## 工作原理
 
-```
-用户描述任务
-  │
-  ├─ Designer  →  需求分析 + scope 定义  (design.md)
-  ├─ Planner   →  任务拆分                (plan.md YAML)
-  │
-  ├─ Scope 隔离并行执行
-  │   ├─ task-001: Coder → Reviewer → Tester  ✓
-  │   ├─ task-002: Coder → Reviewer → Tester  ✓
-  │   └─ task-003: 等待 task-001 → Coder → Reviewer → Tester  ✓
-  │
-  └─ 整体 Review（只读批次报告）
-```
+![Floo 流水线工作原理](./docs/img/how-it-works.png)
 
 **失败处理**
 | 情况 | 行为 |
