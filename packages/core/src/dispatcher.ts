@@ -4,7 +4,7 @@
  * 处理正常流转、失败重试、review 循环、超时取消
  */
 
-import { readFile, writeFile, mkdir, copyFile, access } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, access, appendFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -46,7 +46,6 @@ async function log(flooDir: string, module: string, fields: Record<string, unkno
 
   const logDir = join(flooDir, 'logs');
   await mkdir(logDir, { recursive: true });
-  const { appendFile } = await import('node:fs/promises');
   await appendFile(join(logDir, 'system.log'), line);
 }
 
@@ -384,18 +383,26 @@ async function buildPrompt(
   }
 
   if (phase === 'reviewer' || phase === 'tester') {
-    // 用 base-head 获取 coder 阶段的完整 diff
-    // 追加 '-- <scope>' 路径参数，并行场景下只看本任务的文件变更
+    // 用 base-head 和 head_after 精确锁定 coder 阶段的 diff 范围
+    // 并行场景下避免读到其他任务的 commit（HEAD 是移动目标）
     const scopePaths = task.scope.length > 0 ? ['--', ...task.scope] : [];
     try {
       const signalsDir = join(flooDir, 'signals');
       const baseHead = (await readFile(join(signalsDir, `${task.id}-coder.base-head`), 'utf-8')).trim();
+
+      // 优先用 coder exit artifact 的 head_after（精确快照），fallback 到 HEAD
+      let endRef = 'HEAD';
+      try {
+        const coderArtifact = await readExitArtifact(flooDir, task.id, 'coder');
+        if (coderArtifact.head_after) endRef = coderArtifact.head_after;
+      } catch { /* coder artifact 可能不存在（如 --from reviewer） */ }
+
       if (baseHead) {
-        const { stdout } = await exec('git', ['diff', baseHead, 'HEAD', ...scopePaths], { cwd: projectRoot });
+        const { stdout } = await exec('git', ['diff', baseHead, endRef, ...scopePaths], { cwd: projectRoot });
         vars.diff = stdout.trim();
       } else {
         // 新仓库，用 diff-tree 列出所有文件
-        const { stdout } = await exec('git', ['diff-tree', '--no-commit-id', '-p', '--root', '-r', 'HEAD', ...scopePaths], { cwd: projectRoot });
+        const { stdout } = await exec('git', ['diff-tree', '--no-commit-id', '-p', '--root', '-r', endRef, ...scopePaths], { cwd: projectRoot });
         vars.diff = stdout.trim();
       }
     } catch {
@@ -708,7 +715,8 @@ async function executePhase(
     }, HEARTBEAT_INTERVAL_MS);
 
     try {
-      await waitForCompletion(sessionName, flooDir, task.id, phase);
+      const timeoutMs = config.session.timeout_minutes * 60 * 1000;
+      await waitForCompletion(sessionName, flooDir, task.id, phase, timeoutMs);
     } finally {
       clearInterval(heartbeat);
     }
@@ -956,7 +964,8 @@ ${batchDiff.slice(0, 50000)}
 
   try {
     const sessionName = await adapter.spawn(spawnOpts);
-    await waitForCompletion(sessionName, flooDir, summaryTask.id, 'reviewer');
+    const timeoutMs = config.session.timeout_minutes * 60 * 1000;
+    await waitForCompletion(sessionName, flooDir, summaryTask.id, 'reviewer', timeoutMs);
 
     // 收集 summary artifact 到 batch 目录
     const artifactSrc = join(projectRoot, `${batch.id}-summary.md`);
@@ -1048,6 +1057,7 @@ async function runBatch(
 
         // 从 coder 开始跑（designer/planner 已在 batch 级别完成）
         // 并行安全由 scope 冲突检测保证；commit lock 留给 floo-runner 层精确锁 git 操作
+        // catch 兜底：runTask 内部异常不应让整个 batch 调度崩溃
         const promise = runTask(task, 'coder', opts).then(result => {
           if (result.status === 'completed') {
             completed.add(id);
@@ -1055,6 +1065,13 @@ async function runBatch(
             failed.add(id);
           }
           return result;
+        }).catch(async (err) => {
+          await log(flooDir, 'parallel-crash', { task: id, error: String(err) });
+          task.status = 'failed';
+          task.current_phase = null;
+          await saveTask(flooDir, task);
+          failed.add(id);
+          return task;
         });
         running.set(id, promise);
       }

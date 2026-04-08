@@ -117,6 +117,8 @@ export interface ExitArtifact {
   finished_at: string;        // ISO 8601
   duration_seconds: number;
   files_changed: string[];    // git diff --name-only 的结果
+  /** agent 完成时的 HEAD commit hash（并行场景下精确锁定 diff 范围） */
+  head_after?: string;
 }
 
 // ============================================================

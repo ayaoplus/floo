@@ -248,6 +248,9 @@ if git rev-parse --git-dir > /dev/null 2>&1; then
   fi
 fi
 
+# 记录 agent 完成时的 HEAD（并行场景下精确锁定 diff 范围）
+HEAD_AFTER=$(git rev-parse HEAD 2>/dev/null || echo "")
+
 # 写 exit artifact
 mkdir -p '${signalsDir}'
 cat > '${exitFile}' << EXITEOF
@@ -258,7 +261,8 @@ cat > '${exitFile}' << EXITEOF
   "exit_code": $EXIT_CODE,
   "finished_at": "$FINISHED_AT",
   "duration_seconds": $DURATION,
-  "files_changed": $FILES_JSON
+  "files_changed": $FILES_JSON,
+  "head_after": "$HEAD_AFTER"
 }
 EXITEOF
 
@@ -359,6 +363,13 @@ export abstract class BaseAdapter implements AgentAdapter {
     const signalsDir = join(cwd, '.floo', 'signals');
     const filesChanged = await collectChangedFiles(cwd, signalsDir, taskId, phase);
 
+    // 获取当前 HEAD（被终止时的快照）
+    let headAfter = '';
+    try {
+      const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd });
+      headAfter = stdout.trim();
+    } catch { /* 新仓库无 HEAD */ }
+
     // 主动写 exit artifact，标记为被终止（exit_code = -1）
     await mkdir(signalsDir, { recursive: true });
     const exitFile = join(signalsDir, `${taskId}-${phase}.exit`);
@@ -371,6 +382,7 @@ export abstract class BaseAdapter implements AgentAdapter {
       finished_at: new Date().toISOString(),
       duration_seconds: -1,
       files_changed: filesChanged,
+      head_after: headAfter,
     };
 
     await writeFile(exitFile, JSON.stringify(artifact, null, 2));
@@ -398,12 +410,15 @@ export async function readExitArtifact(
 /**
  * 等待 agent 完成
  * 优先用 tmux wait-for（零延迟），如果 tmux server 不可用则退化为轮询 exit artifact 文件
+ *
+ * @param timeoutMs 最大等待时间，默认 30 分钟（与 session.timeout_minutes 对齐）
  */
 export async function waitForCompletion(
   sessionName: string,
   flooDir: string,
   taskId: string,
   phase: string,
+  timeoutMs: number = 30 * 60 * 1000,
 ): Promise<void> {
   // 先尝试 tmux wait-for
   try {
@@ -415,11 +430,10 @@ export async function waitForCompletion(
 
   // 轮询 exit artifact 文件是否存在
   const exitPath = join(flooDir, 'signals', `${taskId}-${phase}.exit`);
-  const maxWait = 60_000; // 最多等 60 秒
-  const interval = 200;   // 每 200ms 检查一次
+  const interval = 1000;  // 每 1 秒检查一次（退化路径，不需要太频繁）
   let waited = 0;
 
-  while (waited < maxWait) {
+  while (waited < timeoutMs) {
     try {
       await access(exitPath);
       return; // 文件存在，agent 已完成
@@ -429,5 +443,5 @@ export async function waitForCompletion(
     }
   }
 
-  throw new Error(`Timeout waiting for ${sessionName} to complete`);
+  throw new Error(`Timeout waiting for ${sessionName} to complete (${Math.round(timeoutMs / 60000)}min)`);
 }
