@@ -57,6 +57,7 @@ chore(config): initialize project structure and dependencies
 - 不提交 `node_modules/`、`dist/`、`.floo/`
 - 不写空 commit
 - 不在一个 commit 里混合不相关的改动
+- 禁止 `git add -A` 或 `git add .`，必须按文件名 stage，避免误带无关文件
 
 ## 编码规范
 
