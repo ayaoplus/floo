@@ -10,6 +10,8 @@ import { runCommand } from './commands/run.js';
 import { statusCommand } from './commands/status.js';
 import { cancelCommand } from './commands/cancel.js';
 import { monitorCommand } from './commands/monitor.js';
+import { learnCommand } from './commands/learn.js';
+import { syncCommand } from './commands/sync.js';
 
 const program = new Command();
 
@@ -23,5 +25,7 @@ program.addCommand(runCommand);
 program.addCommand(statusCommand);
 program.addCommand(cancelCommand);
 program.addCommand(monitorCommand);
+program.addCommand(learnCommand);
+program.addCommand(syncCommand);
 
 program.parse();
