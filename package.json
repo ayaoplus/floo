@@ -9,7 +9,7 @@
   "files": [
     "dist",
     "skills",
-    "agent-skill",
+    "SKILL.md",
     "templates"
   ],
   "scripts": {

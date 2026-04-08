@@ -140,7 +140,7 @@ export const initCommand = new Command('init')
 
     // 6. 安装 floo SKILL.md 到 agent 发现目录
     // 让 Claude Code、Codex、OpenClaw 等 agent 自动感知 floo 的存在
-    const skillSrc = join(flooRoot, 'agent-skill', 'SKILL.md');
+    const skillSrc = join(flooRoot, 'SKILL.md');
     try {
       await access(skillSrc);
 
@@ -173,7 +173,7 @@ export const initCommand = new Command('init')
         console.log(`  floo SKILL.md 已存在，跳过`);
       }
     } catch {
-      console.log('  警告：找不到 agent-skill/SKILL.md，跳过 skill 安装');
+      console.log('  警告：找不到 SKILL.md，跳过 skill 安装');
     }
 
     // 7. 可选：安装 Playwright 并配置 E2E 测试
