@@ -15,9 +15,31 @@
 
 *Coordinate Claude Code, Codex, and other AI agents through a structured pipeline — parallel execution, cross-review, automatic retry, zero polling.*
 
-[Quick Start](#quick-start) · [How It Works](#how-it-works) · [Commands](#commands) · [Architecture](#architecture) · [Requirements](#requirements)
+[Quick Start](#quick-start) · [How It Works](#how-it-works) · [Commands](#commands) · [Requirements](#requirements)
 
 </div>
+
+---
+
+## Design Philosophy
+
+> *Dispatcher, not engine. tmux + file signals, not frameworks. Skill templates are the product.*
+
+- **Headless orchestration** — Floo coordinates; agents do the work
+- **Zero-latency callbacks** — `tmux wait-for` fires on signal file creation, not a poll loop
+- **Scope-first isolation** — scope locks prevent agents from stepping on each other's commits
+- **No over-engineering** — if it's not needed yet, it's not built
+
+---
+
+## Why Floo?
+
+- **Zero polling** — tmux `wait-for` signals deliver phase transitions instantly, no busy-wait loops
+- **Cross-review by default** — Reviewer uses a different runtime than Coder (e.g. Codex reviews Claude's code)
+- **Scope isolation** — each task is locked to specific files; a commit lock prevents parallel tasks from colliding
+- **Headless** — Floo is a CLI dispatcher; any agent, script, or terminal can call it
+- **Universal skill standard** — one `SKILL.md` at the project root works with Claude Code, Codex, and OpenClaw
+- **Bring your own agents** — configure which runtime and model each role uses in `floo.config.json`
 
 ---
 
@@ -64,17 +86,6 @@ floo monitor          # live progress feed
 
 ---
 
-## Why Floo?
-
-- **Zero polling** — tmux `wait-for` signals deliver phase transitions instantly, no busy-wait loops
-- **Cross-review by default** — Reviewer uses a different runtime than Coder (e.g. Codex reviews Claude's code)
-- **Scope isolation** — each task is locked to specific files; a commit lock prevents parallel tasks from colliding
-- **Headless** — Floo is a CLI dispatcher; any agent, script, or terminal can call it
-- **Universal skill standard** — one `SKILL.md` at the project root works with Claude Code, Codex, and OpenClaw
-- **Bring your own agents** — configure which runtime and model each role uses in `floo.config.json`
-
----
-
 ## Agent Roles
 
 | Role | Responsibility | Output |
@@ -114,24 +125,6 @@ Default bindings (override in `floo.config.json`):
 | `floo cancel <batch-id>` | Cancel a running batch |
 | `floo learn` | Display accumulated lessons from past runs |
 | `floo sync` | Sync skill templates and config to latest version |
-
----
-
-## Architecture
-
-![Floo three-layer architecture](./docs/img/arch-overview.png)
-
-Floo operates across three layers:
-
-| Layer | Components | Role |
-|-------|-----------|------|
-| **Interaction** | Claude Code · Codex · OpenClaw | Human-facing agents that call `floo run` |
-| **Orchestration** | Floo CLI · Dispatcher · Router / Scope Lock | State machine, parallel scheduling, commit lock |
-| **Execution** | designer · planner · coder · reviewer · tester | Worker agents spawned per phase in tmux sessions |
-
-The callback mechanism uses `tmux wait-for` — no polling, no websockets, zero latency between phases.
-
-![Batch lifecycle](./docs/img/batch-lifecycle.png)
 
 ---
 
@@ -180,17 +173,6 @@ At least one AI coding agent:
 | M2: Multi-task + quality | ✅ Done | Parallel dispatch, compile gate, detach mode, tester, batch summary |
 | M3: Operations | 🔄 In progress | Lessons, config sync, health checks |
 | M4: Web UI | 📋 Planned | Next.js monitoring dashboard |
-
----
-
-## Design Philosophy
-
-> *Dispatcher, not engine. tmux + file signals, not frameworks. Skill templates are the product.*
-
-- **Headless orchestration** — Floo coordinates; agents do the work
-- **Zero-latency callbacks** — `tmux wait-for` fires on signal file creation, not a poll loop
-- **Scope-first isolation** — scope locks prevent agents from stepping on each other's commits
-- **No over-engineering** — if it's not needed yet, it's not built
 
 ---
 

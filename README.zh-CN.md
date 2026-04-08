@@ -15,9 +15,31 @@
 
 *将 Claude Code、Codex 等多个 AI agent 通过结构化流水线协调起来——并行执行、交叉审核、自动重试、零轮询回调。*
 
-[快速开始](#快速开始) · [工作原理](#工作原理) · [命令](#命令) · [架构](#架构) · [环境要求](#环境要求)
+[快速开始](#快速开始) · [工作原理](#工作原理) · [命令](#命令) · [环境要求](#环境要求)
 
 </div>
+
+---
+
+## 设计哲学
+
+> *做调度器，不做引擎。tmux + 文件信号，不用框架。Skill 模板才是产品。*
+
+- **无头编排** — Floo 负责协调，agent 负责干活
+- **零延迟回调** — `tmux wait-for` 在信号文件创建时立即触发，不做轮询
+- **Scope 优先隔离** — scope 锁防止 agent 之间的 commit 冲突
+- **如无必要勿增实体** — 还不需要的功能就不做
+
+---
+
+## 为什么用 Floo？
+
+- **零轮询** — 用 tmux `wait-for` 信号驱动阶段切换，不做忙等循环
+- **默认交叉审核** — Reviewer 使用和 Coder 不同的 runtime（如 Codex 审核 Claude 的代码）
+- **Scope 隔离** — 每个任务只能修改指定文件，commit 锁防止并行任务相互冲突
+- **无头设计** — Floo 是 CLI 调度器，任何 agent、脚本或终端都能调用
+- **通用 skill 标准** — 项目根目录的一个 `SKILL.md` 同时兼容 Claude Code、Codex 和 OpenClaw
+- **自由配置 agent** — 在 `floo.config.json` 中指定每个角色使用哪个 runtime 和模型
 
 ---
 
@@ -64,17 +86,6 @@ floo monitor          # 实时进度流
 
 ---
 
-## 为什么用 Floo？
-
-- **零轮询** — 用 tmux `wait-for` 信号驱动阶段切换，不做忙等循环
-- **默认交叉审核** — Reviewer 使用和 Coder 不同的 runtime（如 Codex 审核 Claude 的代码）
-- **Scope 隔离** — 每个任务只能修改指定文件，commit 锁防止并行任务相互冲突
-- **无头设计** — Floo 是 CLI 调度器，任何 agent、脚本或终端都能调用
-- **通用 skill 标准** — 项目根目录的一个 `SKILL.md` 同时兼容 Claude Code、Codex 和 OpenClaw
-- **自由配置 agent** — 在 `floo.config.json` 中指定每个角色使用哪个 runtime 和模型
-
----
-
 ## Agent 角色
 
 | 角色 | 职责 | 产出 |
@@ -114,24 +125,6 @@ floo monitor          # 实时进度流
 | `floo cancel <batch-id>` | 取消运行中的批次 |
 | `floo learn` | 查看历次运行积累的经验 |
 | `floo sync` | 同步 skill 模板和配置到最新版本 |
-
----
-
-## 架构
-
-![Floo 三层架构](./docs/img/arch-overview.png)
-
-Floo 分三层运作：
-
-| 层 | 组件 | 职责 |
-|----|------|------|
-| **交互层** | Claude Code · Codex · OpenClaw | 与人交互的 agent，负责调用 `floo run` |
-| **编排层** | Floo CLI · Dispatcher · Router / Scope Lock | 状态机、并行调度、commit 锁 |
-| **执行层** | designer · planner · coder · reviewer · tester | 每个阶段在独立 tmux session 中运行的 worker agent |
-
-回调机制使用 `tmux wait-for`——无轮询、无 websocket，阶段切换零延迟。
-
-![批次生命周期](./docs/img/batch-lifecycle.png)
 
 ---
 
@@ -180,17 +173,6 @@ floo/
 | M2: 多任务 + 质量提升 | ✅ 已完成 | 并行调度、编译门禁、后台模式、tester、批次总结 |
 | M3: 运维与进化 | 🔄 进行中 | 经验积累、配置同步、健康检查 |
 | M4: Web UI | 📋 计划中 | Next.js 可视化监控面板 |
-
----
-
-## 设计哲学
-
-> *做调度器，不做引擎。tmux + 文件信号，不用框架。Skill 模板才是产品。*
-
-- **无头编排** — Floo 负责协调，agent 负责干活
-- **零延迟回调** — `tmux wait-for` 在信号文件创建时立即触发，不做轮询
-- **Scope 优先隔离** — scope 锁防止 agent 之间的 commit 冲突
-- **如无必要勿增实体** — 还不需要的功能就不做
 
 ---
 
