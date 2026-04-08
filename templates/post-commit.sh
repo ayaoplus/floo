@@ -29,6 +29,9 @@ fi
 if ! npx tsc --noEmit 2>&1; then
   echo ""
   echo "[floo] tsc 编译失败，撤销 commit（代码保留在 working tree）"
-  git reset --soft HEAD~1
+  # 用 $FLOO_REAL_GIT 绕过 git wrapper 的写锁，避免死锁
+  # （post-commit 在外层 git commit 的锁内运行，wrapper 会重入同一把锁）
+  _GIT="${FLOO_REAL_GIT:-git}"
+  "$_GIT" reset --soft HEAD~1
   exit 1
 fi
