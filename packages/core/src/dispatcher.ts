@@ -13,6 +13,7 @@ import { loadSkill, type TemplateVars } from './skills/loader.js';
 import { readExitArtifact, waitForCompletion } from './adapters/base.js';
 import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
 import { notify } from './notifications.js';
+import { extractLesson } from './lessons.js';
 import type {
   Task,
   Batch,
@@ -696,7 +697,21 @@ async function executePhase(
       runtime: binding.runtime, model: binding.model, session: sessionName,
     });
 
-    await waitForCompletion(sessionName, flooDir, task.id, phase);
+    // Heartbeat：每 5 分钟刷新 updated_at，供 health-check 判断任务是否仍在活动
+    const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+    const heartbeat = setInterval(async () => {
+      try {
+        task.updated_at = new Date().toISOString();
+        await saveTask(flooDir, task);
+        await log(flooDir, 'heartbeat', { task: task.id, phase });
+      } catch { /* heartbeat 失败不影响主流程 */ }
+    }, HEARTBEAT_INTERVAL_MS);
+
+    try {
+      await waitForCompletion(sessionName, flooDir, task.id, phase);
+    } finally {
+      clearInterval(heartbeat);
+    }
 
     const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
 
@@ -716,6 +731,13 @@ async function executePhase(
     });
 
     if (exitArtifact.exit_code === 0) {
+      // 重试成功：自动提取经验教训（attempt > 1 说明前面有失败）
+      if (attempt > 1 && lastError) {
+        try {
+          await extractLesson(flooDir, task.id, task.batch_id, phase, lastError, `Retry #${attempt} succeeded`);
+          await log(flooDir, 'lesson-extracted', { task: task.id, phase, attempt });
+        } catch { /* lesson 提取失败不影响主流程 */ }
+      }
       return { success: true, exitArtifact };
     }
 
