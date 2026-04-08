@@ -519,9 +519,10 @@ export async function runTask(
 
     // phase 完成后的特殊处理
     if (phase === 'planner') {
-      // 单任务模式：解析 plan.md 更新当前 task（不拆子任务）
-      const dummyBatch: Batch = { id: task.batch_id, description: '', status: 'active', tasks: [task.id], created_at: '', updated_at: '' };
-      const subTasks = await consumePlannerOutput(flooDir, dummyBatch, task);
+      // 读取已持久化的 batch（而非手动构造空壳，避免状态不一致）
+      const batchPath = join(flooDir, 'batches', task.batch_id, 'batch.json');
+      const batch: Batch = JSON.parse(await readFile(batchPath, 'utf-8'));
+      const subTasks = await consumePlannerOutput(flooDir, batch, task);
       // 如果只有一个子任务，直接用更新后的 task 继续
       if (subTasks.length === 1) {
         Object.assign(task, subTasks[0]);
