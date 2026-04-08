@@ -86,6 +86,18 @@ function toStringArray(val: unknown): string[] {
   return [];
 }
 
+/**
+ * 从 batchId 生成 8 字符的 batch token（HHmmss + 2位随机）
+ * 用于 task ID 前缀，确保并发 batch 的资源不碰撞
+ * 例：batchId = "2026-04-08-080748-auth" → token = "08074832"
+ */
+function deriveBatchToken(batchId: string): string {
+  // 提取时间部分：batchId 格式 "yyyy-MM-dd-HHmmss-..."
+  const timePart = batchId.split('-')[3] ?? '000000';
+  const random = Math.random().toString(36).slice(2, 4); // 2 字符随机
+  return `${timePart}${random}`;
+}
+
 // ============================================================
 // Artifact 收集
 // ============================================================
@@ -186,7 +198,7 @@ function parsePlanTasks(content: string): ParsedTask[] {
   } catch {
     // YAML 解析失败，返回空任务列表（兼容非 YAML 内容）
     return [{
-      id: 'task-001', description: '', scope: [], acceptance_criteria: [],
+      id: 'fallback', description: '', scope: [], acceptance_criteria: [],
       review_level: 'full', depends_on: [],
     }];
   }
@@ -202,7 +214,7 @@ function parsePlanTasks(content: string): ParsedTask[] {
     rawTasks = [parsed];
   } else {
     return [{
-      id: 'task-001', description: '', scope: [], acceptance_criteria: [],
+      id: 'fallback', description: '', scope: [], acceptance_criteria: [],
       review_level: 'full', depends_on: [],
     }];
   }
@@ -217,7 +229,7 @@ function parsePlanTasks(content: string): ParsedTask[] {
 
     const reviewLevel = String(t.review_level ?? 'full').toLowerCase();
     tasks.push({
-      id: String(t.id ?? 'task-001'),
+      id: String(t.id ?? 'fallback'),
       description: String(t.description ?? ''),
       scope: toStringArray(t.scope),
       acceptance_criteria: toStringArray(t.acceptance_criteria),
@@ -230,7 +242,7 @@ function parsePlanTasks(content: string): ParsedTask[] {
   if (tasks.length === 0) {
     const obj = (parsed && typeof parsed === 'object') ? parsed as Record<string, unknown> : {};
     tasks.push({
-      id: 'task-001',
+      id: 'fallback',
       description: '',
       scope: toStringArray(obj.scope),
       acceptance_criteria: toStringArray(obj.acceptance_criteria),
@@ -278,12 +290,27 @@ async function consumePlannerOutput(
   const now = new Date().toISOString();
   const tasks: Task[] = [];
 
+  // 从父任务 ID 提取 batchToken（格式 "{batchToken}-001"），加到子任务 ID 前缀
+  // 确保并发 batch 的子任务 ID 不碰撞
+  const batchToken = parentTask.id.replace(/-\d+$/, '');
+
+  // 建立 planner 原始 ID → 新 ID 的映射表（用于重写 depends_on）
+  const idMap = new Map<string, string>();
+  for (let i = 0; i < parsed.length; i++) {
+    const newId = `${batchToken}-${String(i + 1).padStart(3, '0')}`;
+    idMap.set(parsed[i].id, newId);
+  }
+
   // 父任务的 artifact 目录（design.md / plan.md 存放位置）
   const parentTaskDir = join(flooDir, 'batches', batch.id, 'tasks', parentTask.id);
 
-  for (const p of parsed) {
+  for (let i = 0; i < parsed.length; i++) {
+    const p = parsed[i];
+    const subTaskId = idMap.get(p.id)!;
+    // depends_on 里的原始 ID 映射到新 ID
+    const mappedDeps = p.depends_on.map(dep => idMap.get(dep) ?? dep);
     const task: Task = {
-      id: p.id,
+      id: subTaskId,
       batch_id: batch.id,
       description: p.description || parentTask.description,
       status: 'pending',
@@ -293,7 +320,7 @@ async function consumePlannerOutput(
       review_level: p.review_level,
       created_at: now,
       updated_at: now,
-      depends_on: p.depends_on,
+      depends_on: mappedDeps,
     };
     await saveTask(flooDir, task);
 
@@ -1162,19 +1189,21 @@ export async function createAndRun(
   const timeSlug = now.toISOString().slice(11, 19).replace(/:/g, '');
   const descSlug = description.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '-').replace(/-+/g, '-');
   const batchId = `${date}-${timeSlug}-${descSlug}`;
+  const batchToken = deriveBatchToken(batchId);
+  const mainTaskId = `${batchToken}-001`;
 
   const batch: Batch = {
     id: batchId,
     description,
     status: 'active',
-    tasks: ['task-001'],
+    tasks: [mainTaskId],
     created_at: now.toISOString(),
     updated_at: now.toISOString(),
   };
   await saveBatch(flooDir, batch);
 
   const mainTask: Task = {
-    id: 'task-001',
+    id: mainTaskId,
     batch_id: batchId,
     description,
     status: 'pending',
