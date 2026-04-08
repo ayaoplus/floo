@@ -546,11 +546,14 @@ export async function runTask(
     const result = await executePhase(task, phase, config, flooDir, projectRoot, adapters, runCounter);
 
     if (!result.success) {
-      task.status = 'failed';
+      // 区分被外部终止（cancelled）和真正失败（failed）
+      const wasCancelled = result.exitArtifact?.exit_code === -1;
+      task.status = wasCancelled ? 'cancelled' : 'failed';
       task.current_phase = phase;
       await saveTask(flooDir, task);
-      await log(flooDir, 'failed', { task: task.id, phase, reason: 'max_retries_exceeded' });
-      await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', phase, reason: 'max_retries_exceeded' });
+      const reason = wasCancelled ? 'cancelled_externally' : 'max_retries_exceeded';
+      await log(flooDir, reason, { task: task.id, phase });
+      await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: task.status, phase, reason });
       return task;
     }
 
@@ -1246,6 +1249,19 @@ export async function createAndRun(
   } catch { /* 新仓库无 HEAD */ }
   await writeFile(join(signalsDir, `${batchId}-batch.base-head`), batchBaseHead);
 
+  /** 基础设施异常兜底：确保 task/batch 不会停留在 running/active 脏状态 */
+  async function failBatch(error: unknown): Promise<{ batch: Batch; tasks: Task[] }> {
+    await log(flooDir, 'createAndRun-crash', { batch: batchId, error: String(error) });
+    mainTask.status = 'failed';
+    mainTask.current_phase = null;
+    await saveTask(flooDir, mainTask);
+    batch.status = 'failed';
+    await saveBatch(flooDir, batch);
+    return { batch, tasks: [mainTask] };
+  }
+
+  try {
+
   // 如果从 coder 或更后的 phase 开始，跳过 planner，直接单任务执行
   // coder 开始 → 跑完整后续流程（coder→reviewer→tester）
   // reviewer/tester 开始 → 只跑该单个 phase（不继续到后续 phase）
@@ -1255,7 +1271,7 @@ export async function createAndRun(
     // reviewer/tester 是单 phase 任务，不跑后续；coder 跑完整后续
     const endPhase = startPhase === 'coder' ? undefined : startPhase;
     const result = await runTask(mainTask, startPhase, opts, endPhase);
-    batch.status = result.status === 'completed' ? 'completed' : 'failed';
+    batch.status = result.status === 'completed' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
     await saveBatch(flooDir, batch);
 
     // 从 coder 走完整流程的任务也触发 summary review
@@ -1275,19 +1291,6 @@ export async function createAndRun(
   const adapters = opts.adapters;
   mainTask.status = 'running';
   await saveTask(flooDir, mainTask);
-
-  /** 基础设施异常兜底：确保 task/batch 不会停留在 running/active 脏状态 */
-  async function failBatch(error: unknown): Promise<{ batch: Batch; tasks: Task[] }> {
-    await log(flooDir, 'createAndRun-crash', { batch: batchId, error: String(error) });
-    mainTask.status = 'failed';
-    mainTask.current_phase = null;
-    await saveTask(flooDir, mainTask);
-    batch.status = 'failed';
-    await saveBatch(flooDir, batch);
-    return { batch, tasks: [mainTask] };
-  }
-
-  try {
 
   // 执行 designer（如果需要）
   if (startPhase === 'designer') {
@@ -1326,7 +1329,7 @@ export async function createAndRun(
     // 单任务：继续跑 coder → reviewer → tester
     const task = subTasks[0] ?? mainTask;
     const result = await runTask(task, 'coder', opts);
-    batch.status = result.status === 'completed' ? 'completed' : 'failed';
+    batch.status = result.status === 'completed' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed';
     await saveBatch(flooDir, batch);
 
     // 单任务完成后触发整体 review（只读报告）
@@ -1348,10 +1351,14 @@ export async function createAndRun(
 
   const results = await runBatch(subTasks, opts);
 
-  // 更新 batch 状态
+  // 更新 batch 状态：所有任务的终态决定 batch 终态
   const allCompleted = results.every(t => t.status === 'completed');
   const anyFailed = results.some(t => t.status === 'failed');
-  batch.status = allCompleted ? 'completed' : anyFailed ? 'failed' : 'active';
+  const allCancelledOrDone = results.every(t => t.status === 'completed' || t.status === 'cancelled');
+  batch.status = allCompleted ? 'completed'
+    : anyFailed ? 'failed'
+    : allCancelledOrDone ? 'cancelled'
+    : 'active';
   await saveBatch(flooDir, batch);
 
   // 所有任务完成后才触发整体 review（避免失败任务的 commit 混进 summary diff）
