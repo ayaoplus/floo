@@ -15,6 +15,9 @@
 
 *Coordinate Claude Code, Codex, and other AI agents through a structured pipeline — parallel execution, cross-review, automatic retry, zero polling.*
 
+> Named after **Floo Powder** from Harry Potter — toss it in, say where you want to go, and you're there instantly. That's the idea: describe a task, and the agent network takes you to working code.
+
+
 [Quick Start](#quick-start) · [Commands](#commands) · [How It Works](#how-it-works) · [Requirements](#requirements)
 
 </div>
