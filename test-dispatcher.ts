@@ -1,0 +1,576 @@
+/**
+ * Dispatcher 核心逻辑测试
+ * 用 MockAdapter 模拟 agent 行为，验证状态机流转、重试、review 循环、并行调度
+ */
+
+import { writeFile, mkdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import { runTask, createAndRun, type DispatcherOptions } from './packages/core/src/dispatcher.js';
+import { ensureFlooDir } from './packages/core/src/scope.js';
+import { readExitArtifact } from './packages/core/src/adapters/base.js';
+import type {
+  Task,
+  Phase,
+  Runtime,
+  SpawnOptions,
+  ExitArtifact,
+  AgentAdapter,
+  FlooConfig,
+} from './packages/core/src/types.js';
+import { DEFAULT_CONFIG } from './packages/core/src/types.js';
+
+const exec = promisify(execFile);
+
+// ============================================================
+// 测试工具
+// ============================================================
+
+let passed = 0;
+let failed = 0;
+
+function assert(condition: boolean, msg: string) {
+  if (condition) {
+    console.log(`  ✓ ${msg}`);
+    passed++;
+  } else {
+    console.log(`  ✗ ${msg}`);
+    failed++;
+  }
+}
+
+/** 创建临时 git 仓库 + .floo 目录 + skill 模板 */
+async function setupTestProject(): Promise<string> {
+  const dir = join(tmpdir(), `floo-dispatch-test-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
+  await mkdir(dir, { recursive: true });
+
+  // 初始化 git repo
+  await exec('git', ['init'], { cwd: dir });
+  await exec('git', ['config', 'user.email', 'test@floo.dev'], { cwd: dir });
+  await exec('git', ['config', 'user.name', 'Floo Test'], { cwd: dir });
+  // 创建初始 commit，确保 HEAD 存在
+  await writeFile(join(dir, '.gitkeep'), '');
+  await exec('git', ['add', '.'], { cwd: dir });
+  await exec('git', ['commit', '-m', 'init'], { cwd: dir });
+
+  // 初始化 .floo 目录
+  await ensureFlooDir(dir);
+
+  // 最小 skill 模板（只要模板文件存在就行，内容不影响逻辑测试）
+  const skillsDir = join(dir, 'skills');
+  await mkdir(skillsDir, { recursive: true });
+  for (const skill of ['designer', 'planner', 'coder', 'reviewer', 'tester']) {
+    await writeFile(join(skillsDir, `${skill}.md`), `You are ${skill}. {{description}}`);
+  }
+
+  return dir;
+}
+
+async function cleanupTestProject(dir: string) {
+  await rm(dir, { recursive: true, force: true });
+}
+
+// ============================================================
+// MockAdapter：模拟 agent 行为
+// ============================================================
+
+/**
+ * 模拟 agent 行为的配置
+ * key 是 phase 名，value 是该 phase 的模拟行为
+ */
+interface MockBehavior {
+  exitCode: number;
+  /** 写入项目根目录的 artifact 文件内容（key=文件名，value=内容） */
+  artifacts?: Record<string, string>;
+  /** 模拟 coder 产出的文件变更 */
+  filesChanged?: string[];
+}
+
+/** 简易 mutex：序列化 mock 的 git 操作，避免并行测试的 index.lock 冲突 */
+let _gitLockPromise: Promise<void> = Promise.resolve();
+let _gitUnlock: (() => void) | null = null;
+async function acquireGitMutex(): Promise<void> {
+  await _gitLockPromise;
+  _gitLockPromise = new Promise(resolve => { _gitUnlock = resolve; });
+}
+function releaseGitMutex(): void {
+  _gitUnlock?.();
+  _gitUnlock = null;
+}
+
+class MockAdapter implements AgentAdapter {
+  runtime: Runtime = 'claude';
+
+  /** phase → attempt → behavior（支持不同 attempt 返回不同结果） */
+  private behaviors: Map<string, MockBehavior[]> = new Map();
+  /** 记录每个 phase 被调用的次数 */
+  callCounts: Map<string, number> = new Map();
+
+  /**
+   * 设置 phase 的模拟行为
+   * behaviors 数组按 attempt 顺序消费，最后一个会重复使用
+   */
+  setBehavior(phase: Phase, behaviors: MockBehavior[]) {
+    this.behaviors.set(phase, behaviors);
+  }
+
+  private getBehavior(phase: Phase): MockBehavior {
+    // callCounts 已在 spawn 中递增为 1-based，转为 0-based 索引
+    const count = (this.callCounts.get(phase) ?? 1) - 1;
+    const list = this.behaviors.get(phase) ?? [{ exitCode: 0 }];
+    return list[Math.min(count, list.length - 1)];
+  }
+
+  async spawn(opts: SpawnOptions): Promise<string> {
+    const sessionName = `floo-${opts.taskId}-${opts.phase}`;
+    const count = (this.callCounts.get(opts.phase) ?? 0) + 1;
+    this.callCounts.set(opts.phase, count);
+
+    const behavior = this.getBehavior(opts.phase as Phase);
+    const signalsDir = join(opts.cwd, '.floo', 'signals');
+    await mkdir(signalsDir, { recursive: true });
+
+    // 写 artifact 文件到项目根目录（模拟 agent 产出）
+    // 文件名中的 {taskId} 占位符会被替换为实际 taskId
+    if (behavior.artifacts) {
+      for (const [filename, content] of Object.entries(behavior.artifacts)) {
+        const actualName = filename.replace(/\{taskId\}/g, opts.taskId);
+        await writeFile(join(opts.cwd, actualName), content);
+      }
+    }
+
+    // 模拟 coder 写文件并 commit（加锁避免并行 git 冲突）
+    if (opts.phase === 'coder' && behavior.exitCode === 0 && behavior.filesChanged && behavior.filesChanged.length > 0) {
+      await acquireGitMutex();
+      try {
+        for (const file of behavior.filesChanged) {
+          const filePath = join(opts.cwd, file);
+          await mkdir(join(filePath, '..'), { recursive: true });
+          await writeFile(filePath, `// generated by mock coder: ${opts.taskId}\n`);
+        }
+        await exec('git', ['add', '.'], { cwd: opts.cwd });
+        await exec('git', ['commit', '-m', `mock coder: ${opts.taskId}`], { cwd: opts.cwd });
+      } finally {
+        releaseGitMutex();
+      }
+    }
+
+    // 获取当前 HEAD
+    let headAfter = '';
+    try {
+      const { stdout } = await exec('git', ['rev-parse', 'HEAD'], { cwd: opts.cwd });
+      headAfter = stdout.trim();
+    } catch { /* ignore */ }
+
+    // 写 exit artifact
+    const artifact: ExitArtifact = {
+      task_id: opts.taskId,
+      phase: opts.phase as Phase,
+      session_name: sessionName,
+      exit_code: behavior.exitCode,
+      finished_at: new Date().toISOString(),
+      duration_seconds: 1,
+      files_changed: behavior.filesChanged ?? [],
+      head_after: headAfter,
+    };
+    await writeFile(
+      join(signalsDir, `${opts.taskId}-${opts.phase}.exit`),
+      JSON.stringify(artifact, null, 2),
+    );
+
+    // 写 base-head（模拟 BaseAdapter.spawn 的行为）
+    await writeFile(join(signalsDir, `${opts.taskId}-${opts.phase}.base-head`), headAfter);
+
+    return sessionName;
+  }
+
+  async isAlive(): Promise<boolean> { return false; }
+  async getOutput(): Promise<string> { return 'mock output'; }
+  async sendMessage(): Promise<void> { /* no-op */ }
+  async kill(sessionName: string, cwd: string, taskId: string, phase: string): Promise<void> {
+    const signalsDir = join(cwd, '.floo', 'signals');
+    await mkdir(signalsDir, { recursive: true });
+    const artifact: ExitArtifact = {
+      task_id: taskId,
+      phase: phase as Phase,
+      session_name: sessionName,
+      exit_code: -1,
+      finished_at: new Date().toISOString(),
+      duration_seconds: -1,
+      files_changed: [],
+    };
+    await writeFile(
+      join(signalsDir, `${taskId}-${phase}.exit`),
+      JSON.stringify(artifact, null, 2),
+    );
+  }
+}
+
+/** 短超时配置，测试不需要等 30 分钟 */
+const TEST_CONFIG: FlooConfig = {
+  ...DEFAULT_CONFIG,
+  session: { ...DEFAULT_CONFIG.session, timeout_minutes: 1 },
+};
+
+/** 创建测试用 Task 对象 */
+function makeTask(overrides?: Partial<Task>): Task {
+  const now = new Date().toISOString();
+  return {
+    id: 'task-001',
+    batch_id: 'test-batch',
+    description: 'test task',
+    status: 'pending',
+    current_phase: null,
+    scope: ['src/'],
+    acceptance_criteria: ['it works'],
+    review_level: 'full',
+    created_at: now,
+    updated_at: now,
+    depends_on: [],
+    ...overrides,
+  };
+}
+
+// ============================================================
+// 测试用例
+// ============================================================
+
+// 替换 waitForCompletion 使其不依赖 tmux
+// MockAdapter 直接写好了 exit artifact，轮询会立即找到文件
+// 但需要 monkey-patch 掉 tmux wait-for 调用
+
+console.log('\n=== 9. Dispatcher 状态机：单任务 happy path ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  // coder 成功 + 产出文件
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: ['src/api.ts'],
+    artifacts: {},
+  }]);
+  // reviewer pass
+  mock.setBehavior('reviewer', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-review.md': 'verdict: pass\n\nLooks good.' },
+  }]);
+  // tester pass
+  mock.setBehavior('tester', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-test-report.md': 'result: pass\n\nAll tests passed.' },
+  }]);
+
+  const task = makeTask();
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'completed', '单任务 happy path → completed');
+  assert(mock.callCounts.get('coder') === 1, 'coder 调用 1 次');
+  assert(mock.callCounts.get('reviewer') === 1, 'reviewer 调用 1 次');
+  assert(mock.callCounts.get('tester') === 1, 'tester 调用 1 次');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 10. Dispatcher：reviewer fail → coder 重试 → reviewer pass ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  // coder 始终成功
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: ['src/api.ts'],
+  }]);
+  // reviewer: 第 1 次 fail，第 2 次 pass
+  mock.setBehavior('reviewer', [
+    { exitCode: 0, artifacts: { '{taskId}-review.md': 'verdict: fail\n\nMissing error handling.' } },
+    { exitCode: 0, artifacts: { '{taskId}-review.md': 'verdict: pass\n\nFixed.' } },
+  ]);
+  // tester pass
+  mock.setBehavior('tester', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-test-report.md': 'result: pass' },
+  }]);
+
+  const task = makeTask();
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'completed', 'reviewer fail 后重试最终 completed');
+  assert(mock.callCounts.get('coder') === 2, 'coder 被调用 2 次（原始 + review fail 后重试）');
+  assert(mock.callCounts.get('reviewer') === 2, 'reviewer 被调用 2 次');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 11. Dispatcher：tester fail → coder 重试 → tester pass ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: ['src/api.ts'],
+  }]);
+  mock.setBehavior('reviewer', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-review.md': 'verdict: pass' },
+  }]);
+  // tester: 第 1 次 fail，第 2 次 pass
+  mock.setBehavior('tester', [
+    { exitCode: 0, artifacts: { '{taskId}-test-report.md': 'result: fail\n\nTimeout in login flow.' } },
+    { exitCode: 0, artifacts: { '{taskId}-test-report.md': 'result: pass' } },
+  ]);
+
+  const task = makeTask();
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'completed', 'tester fail 后重试最终 completed');
+  // tester fail → coder → reviewer → tester：coder 调 2 次，reviewer 调 2 次，tester 调 2 次
+  assert(mock.callCounts.get('coder') === 2, 'coder 被调用 2 次');
+  assert(mock.callCounts.get('tester') === 2, 'tester 被调用 2 次');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 12. Dispatcher：max review rounds 后 failed ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: ['src/api.ts'],
+  }]);
+  // reviewer 永远 fail
+  mock.setBehavior('reviewer', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-review.md': 'verdict: fail\n\nStill broken.' },
+  }]);
+
+  const task = makeTask();
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'failed', 'max review rounds → failed');
+  // 初始 coder(1) + reviewer fail(1) → coder(2) + reviewer fail(2) → failed
+  assert(mock.callCounts.get('reviewer') === 2, 'reviewer 正好调用 MAX_REVIEW_ROUNDS 次');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 13. Dispatcher：coder 重试 3 次后 failed ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  // coder 永远失败
+  mock.setBehavior('coder', [{
+    exitCode: 1,
+    filesChanged: [],
+  }]);
+
+  const task = makeTask();
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'failed', 'coder 3 次失败 → task failed');
+  assert(mock.callCounts.get('coder') === 3, 'coder 重试 MAX_RETRIES 次');
+  assert(!mock.callCounts.has('reviewer'), 'reviewer 没被调用');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 14. Dispatcher：review_level=scan 跳过 reviewer agent ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: ['src/api.ts'],
+  }]);
+  mock.setBehavior('tester', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-test-report.md': 'result: pass' },
+  }]);
+
+  const task = makeTask({ review_level: 'scan' });
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'completed', 'scan 模式 → completed');
+  assert(!mock.callCounts.has('reviewer'), 'scan 模式不派 reviewer agent');
+  assert(mock.callCounts.get('tester') === 1, 'tester 仍然执行');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 15. Dispatcher：review_level=skip 跳过 reviewer ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: ['src/api.ts'],
+  }]);
+  mock.setBehavior('tester', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-test-report.md': 'result: pass' },
+  }]);
+
+  const task = makeTask({ review_level: 'skip' });
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'completed', 'skip 模式 → completed');
+  assert(!mock.callCounts.has('reviewer'), 'skip 模式不派 reviewer');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 16. Dispatcher：createAndRun 多任务并行调度 ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  // planner 输出多任务 plan
+  const planYaml = `
+tasks:
+  - id: sub-001
+    description: "改 API"
+    scope: ["src/api/"]
+    acceptance_criteria: ["API works"]
+    review_level: skip
+    depends_on: []
+  - id: sub-002
+    description: "改前端"
+    scope: ["src/web/"]
+    acceptance_criteria: ["UI works"]
+    review_level: skip
+    depends_on: []
+`;
+
+  mock.setBehavior('designer', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-design.md': '# Design\nDo the thing.' },
+  }]);
+  mock.setBehavior('planner', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-plan.md': planYaml },
+  }]);
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: [],
+  }]);
+  mock.setBehavior('tester', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-test-report.md': 'result: pass' },
+  }]);
+
+  const opts: DispatcherOptions & { scope?: string[] } = {
+    projectRoot: dir,
+    config: { ...TEST_CONFIG, concurrency: { max_agents: 3, commit_lock: false } },
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await createAndRun('测试多任务并行', 'designer', opts);
+
+  assert(result.batch.status === 'completed', '多任务批次 → completed');
+  assert(result.tasks.length === 2, '拆出 2 个子任务');
+  assert(result.tasks.every(t => t.status === 'completed'), '所有子任务 completed');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 17. Dispatcher：head_after 写入 exit artifact ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  mock.setBehavior('coder', [{
+    exitCode: 0,
+    filesChanged: ['src/test.ts'],
+  }]);
+  mock.setBehavior('reviewer', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-review.md': 'verdict: pass' },
+  }]);
+  mock.setBehavior('tester', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-test-report.md': 'result: pass' },
+  }]);
+
+  const task = makeTask();
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  await runTask(task, 'coder', opts);
+
+  // 验证 coder 的 exit artifact 包含 head_after
+  const flooDir = join(dir, '.floo');
+  const artifact = await readExitArtifact(flooDir, 'task-001', 'coder');
+  assert(typeof artifact.head_after === 'string' && artifact.head_after.length > 0, 'exit artifact 包含 head_after');
+
+  await cleanupTestProject(dir);
+}
+
+// ============================================================
+// 结果
+// ============================================================
+
+console.log(`\n=== 结果：${passed} passed, ${failed} failed ===\n`);
+process.exit(failed > 0 ? 1 : 0);

@@ -10,7 +10,7 @@
     "packages/web"
   ],
   "scripts": {
-    "test": "tsx test-batch1.ts",
+    "test": "tsx test-batch1.ts && tsx test-dispatcher.ts",
     "build": "tsc -b packages/core packages/cli"
   },
   "devDependencies": {
