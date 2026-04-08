@@ -22,7 +22,7 @@ export type TaskStatus =
   | 'cancelled'; // 用户取消
 
 /** 批次状态 */
-export type BatchStatus = 'active' | 'completed' | 'cancelled';
+export type BatchStatus = 'active' | 'completed' | 'failed' | 'cancelled';
 
 /** Review 结论 */
 export type Verdict = 'pass' | 'fail';

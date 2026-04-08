@@ -1251,7 +1251,7 @@ export async function createAndRun(
     // reviewer/tester 是单 phase 任务，不跑后续；coder 跑完整后续
     const endPhase = startPhase === 'coder' ? undefined : startPhase;
     const result = await runTask(mainTask, startPhase, opts, endPhase);
-    batch.status = result.status === 'completed' ? 'completed' : 'active';
+    batch.status = result.status === 'completed' ? 'completed' : 'failed';
     await saveBatch(flooDir, batch);
 
     // 从 coder 走完整流程的任务也触发 summary review
@@ -1305,7 +1305,7 @@ export async function createAndRun(
     // 单任务：继续跑 coder → reviewer → tester
     const task = subTasks[0] ?? mainTask;
     const result = await runTask(task, 'coder', opts);
-    batch.status = result.status === 'completed' ? 'completed' : 'active';
+    batch.status = result.status === 'completed' ? 'completed' : 'failed';
     await saveBatch(flooDir, batch);
 
     // 单任务完成后触发整体 review（只读报告）
@@ -1329,7 +1329,8 @@ export async function createAndRun(
 
   // 更新 batch 状态
   const allCompleted = results.every(t => t.status === 'completed');
-  batch.status = allCompleted ? 'completed' : 'active';
+  const anyFailed = results.some(t => t.status === 'failed');
+  batch.status = allCompleted ? 'completed' : anyFailed ? 'failed' : 'active';
   await saveBatch(flooDir, batch);
 
   // 所有任务完成后才触发整体 review（避免失败任务的 commit 混进 summary diff）
