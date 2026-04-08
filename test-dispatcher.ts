@@ -8,9 +8,9 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { runTask, createAndRun, type DispatcherOptions } from './packages/core/src/dispatcher.js';
-import { ensureFlooDir } from './packages/core/src/scope.js';
-import { readExitArtifact } from './packages/core/src/adapters/base.js';
+import { runTask, createAndRun, type DispatcherOptions } from './src/core/dispatcher.js';
+import { ensureFlooDir } from './src/core/scope.js';
+import { readExitArtifact } from './src/core/adapters/base.js';
 import type {
   Task,
   Phase,
@@ -19,8 +19,8 @@ import type {
   ExitArtifact,
   AgentAdapter,
   FlooConfig,
-} from './packages/core/src/types.js';
-import { DEFAULT_CONFIG } from './packages/core/src/types.js';
+} from './src/core/types.js';
+import { DEFAULT_CONFIG } from './src/core/types.js';
 
 const exec = promisify(execFile);
 
@@ -590,7 +590,7 @@ console.log('\n=== 18. createAndRun：designer 期间 cancel → cancelled（非
   assert(!mock.callCounts.has('planner'), 'planner 不应启动');
 
   // 验证通知闭环：task_completed + batch_completed 都要有
-  const { listNotifications } = await import('./packages/core/src/notifications.js');
+  const { listNotifications } = await import('./src/core/notifications.js');
   const notifs = await listNotifications(join(dir, '.floo'));
   const taskCompleted = notifs.filter(n => n.event === 'task_completed');
   const batchCompleted = notifs.filter(n => n.event === 'batch_completed');
@@ -626,7 +626,7 @@ console.log('\n=== 19. createAndRun：planner 期间 cancel → cancelled（非 
   assert(!mock.callCounts.has('coder'), 'coder 不应启动');
 
   // 验证通知闭环
-  const { listNotifications } = await import('./packages/core/src/notifications.js');
+  const { listNotifications } = await import('./src/core/notifications.js');
   const notifs = await listNotifications(join(dir, '.floo'));
   const batchCompleted = notifs.filter(n => n.event === 'batch_completed');
   assert(batchCompleted.length >= 1, '有 batch_completed 通知');
@@ -696,7 +696,7 @@ console.log('\n=== 21. runTask：coder 期间 cancel → cancelled 状态和通�
   assert(result.status === 'cancelled', 'task → cancelled');
 
   // 验证 task_completed 通知存在
-  const { listNotifications } = await import('./packages/core/src/notifications.js');
+  const { listNotifications } = await import('./src/core/notifications.js');
   const notifs = await listNotifications(join(dir, '.floo'));
   const taskCompleted = notifs.filter(n => n.event === 'task_completed' && n.task_id === task.id);
   assert(taskCompleted.length >= 1, '有 task_completed 通知');

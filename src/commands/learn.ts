@@ -9,7 +9,7 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
 import { access } from 'node:fs/promises';
-import { addLesson, listLessons, distillRules } from '@floo/core';
+import { addLesson, listLessons, distillRules } from '../core/index.js';
 
 export const learnCommand = new Command('learn')
   .description('记录经验教训')

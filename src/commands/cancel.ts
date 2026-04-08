@@ -14,7 +14,7 @@ import {
   cancelTask,
   DEFAULT_CONFIG,
   type FlooConfig,
-} from '@floo/core';
+} from '../core/index.js';
 
 export const cancelCommand = new Command('cancel')
   .description('取消正在运行的任务')

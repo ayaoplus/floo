@@ -1,24 +1,29 @@
 {
   "name": "floo",
   "version": "0.1.0",
-  "private": true,
-  "type": "module",
   "description": "Multi-Agent Vibe Coding Harness",
-  "workspaces": [
-    "packages/core",
-    "packages/cli",
-    "packages/web"
+  "type": "module",
+  "bin": {
+    "floo": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "skills",
+    "agent-skill",
+    "templates"
   ],
   "scripts": {
-    "test": "tsx test-batch1.ts && tsx test-dispatcher.ts",
-    "build": "tsc -b packages/core packages/cli"
+    "build": "tsc",
+    "test": "npm run build && tsx test-batch1.ts && tsx test-dispatcher.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "commander": "^14.0.3",
+    "yaml": "^2.8.3"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
-  },
-  "dependencies": {
-    "commander": "^14.0.3"
   }
 }

@@ -17,7 +17,7 @@ import {
   DEFAULT_CONFIG,
   type Phase,
   type FlooConfig,
-} from '@floo/core';
+} from '../core/index.js';
 
 const exec = promisify(execFile);
 

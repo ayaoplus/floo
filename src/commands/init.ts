@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { symlink } from 'node:fs/promises';
-import { ensureFlooDir, DEFAULT_CONFIG } from '@floo/core';
+import { ensureFlooDir, DEFAULT_CONFIG } from '../core/index.js';
 
 /**
  * 找到 floo 项目根目录（包含 skills/ 和 templates/ 的目录）

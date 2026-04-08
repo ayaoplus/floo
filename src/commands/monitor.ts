@@ -7,7 +7,7 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
 import { access, readFile } from 'node:fs/promises';
-import { getStatusSummary, checkTimeouts, listNotifications, DEFAULT_CONFIG } from '@floo/core';
+import { getStatusSummary, checkTimeouts, listNotifications, DEFAULT_CONFIG } from '../core/index.js';
 
 export const monitorCommand = new Command('monitor')
   .description('实时监控任务状态')

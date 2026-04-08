@@ -6,7 +6,7 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
 import { access } from 'node:fs/promises';
-import { getStatusSummary } from '@floo/core';
+import { getStatusSummary } from '../core/index.js';
 
 export const statusCommand = new Command('status')
   .description('查看当前项目的任务状态')

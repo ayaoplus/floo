@@ -6,7 +6,7 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
 import { readFile, writeFile, access } from 'node:fs/promises';
-import { distillRules } from '@floo/core';
+import { distillRules } from '../core/index.js';
 
 /** 生成 CLAUDE.md 内容（project-rules 嵌入到 Claude 格式） */
 function generateClaudeMd(rules: string, projectName: string): string {
