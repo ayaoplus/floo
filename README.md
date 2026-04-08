@@ -1,146 +1,211 @@
+<div align="right">
+
+[English](./README.md) | [中文](./README.zh-CN.md)
+
+</div>
+
+<div align="center">
+
 # Floo
 
 **Multi-Agent Vibe Coding Harness**
 
-A lightweight orchestration layer for solo developers who want multiple AI coding agents working together — parallel development, cross-review, automatic retry, and task tracking.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![GitHub Stars](https://img.shields.io/github/stars/ayaoplus/floo?style=social)](https://github.com/ayaoplus/floo)
 
-> **Language / 语言**: English | [中文](./README.zh-CN.md)
+*Coordinate Claude Code, Codex, and other AI agents through a structured pipeline — parallel execution, cross-review, automatic retry, zero polling.*
+
+[Quick Start](#quick-start) · [How It Works](#how-it-works) · [Commands](#commands) · [Architecture](#architecture) · [Requirements](#requirements)
+
+</div>
 
 ---
 
-## What It Does
+## Quick Start
 
-Floo coordinates AI coding agents (Claude Code, Codex, etc.) through a structured pipeline:
+**Step 1 — Install**
 
-```
-User describes task → Designer → Planner → Coder(s) → Reviewer → Tester → Summary Report
-```
-
-- **Parallel execution**: Planner splits work into subtasks; non-conflicting tasks run simultaneously
-- **Cross-review**: Reviewer uses a different runtime than Coder (e.g., Codex reviews Claude's code)
-- **Automatic retry**: Failed phases retry with error context, up to 3 attempts
-- **Scope isolation**: Each task is restricted to specific files; commit locks prevent conflicts
-- **Headless design**: Floo is a dispatcher, not a UI — any agent or script can call it
-
-## Architecture
-
-```
-User ↔ Any agent (Claude Code / Codex / OpenClaw) ↔ Floo CLI ↔ Dispatcher ↔ Worker agents
-         interaction layer                            orchestration     execution
+```bash
+git clone https://github.com/ayaoplus/floo.git
+cd floo
+npm install && npm run build
+npm link          # makes `floo` available globally
 ```
 
-Floo itself is a **headless orchestration layer**. It doesn't bind to any interaction method. Whoever calls the CLI is the interaction layer.
+**Step 2 — Initialize your project**
 
-### Six Roles
+```bash
+cd /path/to/your/project
+floo init
+```
 
-| Role | Job | Output |
-|------|-----|--------|
+This creates `.floo/`, installs skill templates, and registers `SKILL.md` so any agent (CC / Codex / OpenClaw) can discover and call floo automatically.
+
+**Step 3 — Run**
+
+```bash
+floo run "Add user authentication to the API"
+floo monitor          # live progress feed
+```
+
+---
+
+## How It Works
+
+```
+User describes task
+  │
+  ├─ Designer  →  requirements + scope definition  (design.md)
+  ├─ Planner   →  task decomposition               (plan.md YAML)
+  │
+  ├─ Scope-isolated parallel execution
+  │   ├─ task-001: Coder → Reviewer → Tester  ✓
+  │   ├─ task-002: Coder → Reviewer → Tester  ✓
+  │   └─ task-003: waits for task-001 → Coder → Reviewer → Tester  ✓
+  │
+  └─ Summary Review  (read-only batch report)
+```
+
+**Failure handling**
+| Situation | Behavior |
+|-----------|----------|
+| Reviewer fail | Back to Coder — max 2 rounds |
+| Tester fail | Back to Coder → Reviewer → Tester — max 2 rounds |
+| Phase crash | Retry with error context — max 3 attempts |
+| All retries exhausted | Pause and notify human |
+
+---
+
+## Why Floo?
+
+- **Zero polling** — tmux `wait-for` signals deliver phase transitions instantly, no busy-wait loops
+- **Cross-review by default** — Reviewer uses a different runtime than Coder (e.g. Codex reviews Claude's code)
+- **Scope isolation** — each task is locked to specific files; a commit lock prevents parallel tasks from colliding
+- **Headless** — Floo is a CLI dispatcher; any agent, script, or terminal can call it
+- **Universal skill standard** — one `SKILL.md` at the project root works with Claude Code, Codex, and OpenClaw
+- **Bring your own agents** — configure which runtime and model each role uses in `floo.config.json`
+
+---
+
+## Agent Roles
+
+| Role | Responsibility | Output |
+|------|---------------|--------|
 | **Designer** | Requirements analysis, scope definition | `design.md` |
 | **Planner** | Task decomposition, dependency ordering | `plan.md` (strict YAML) |
 | **Coder** | Write code, atomic commits | git commits |
-| **Reviewer** | Code review (read-only) | `review.md` (pass/fail) |
-| **Tester** | E2E / integration testing | `test-report.md` (pass/fail) |
-| **house-elf** | System maintenance | lessons, config sync, cleanup |
+| **Reviewer** | Code review — read-only | `review.md` (pass / fail) |
+| **Tester** | E2E / integration testing | `test-report.md` (pass / fail) |
 
-### Default Role Bindings
+Default bindings (override in `floo.config.json`):
 
-```yaml
-designer:  { runtime: claude, model: sonnet }
-planner:   { runtime: claude, model: sonnet }
-coder:     { runtime: claude, model: sonnet }
-reviewer:  { runtime: codex,  model: codex-mini }  # cross-review by default
-tester:    { runtime: claude, model: sonnet }
+```json
+{
+  "roles": {
+    "designer": { "runtime": "claude", "model": "claude-sonnet-4-5" },
+    "planner":  { "runtime": "claude", "model": "claude-sonnet-4-5" },
+    "coder":    { "runtime": "claude", "model": "claude-sonnet-4-5" },
+    "reviewer": { "runtime": "codex",  "model": "codex-mini" },
+    "tester":   { "runtime": "claude", "model": "claude-sonnet-4-5" }
+  }
+}
 ```
 
-Override per-project in `floo.config.json`, or per-task via Planner output.
+---
 
-## Quick Start
+## Commands
 
-```bash
-# Clone and install
-git clone https://github.com/ayaoplus/floo.git
-cd floo && npm install
+| Command | Description |
+|---------|-------------|
+| `floo init` | Initialize floo in the current project |
+| `floo init --with-playwright` | Also install Playwright for E2E testing |
+| `floo run "<description>"` | Run a new task through the full pipeline |
+| `floo run "<description>" --detach` | Run in background, return immediately |
+| `floo status` | Snapshot of current batch and task states |
+| `floo monitor` | Live notification stream |
+| `floo cancel <batch-id>` | Cancel a running batch |
+| `floo learn` | Display accumulated lessons from past runs |
+| `floo sync` | Sync skill templates and config to latest version |
 
-# Build
-npm run build
+---
 
-# Initialize in your project
-cd /path/to/your/project
-floo init                        # creates .floo/, config, skill templates
-floo init --with-playwright      # also installs Playwright for E2E testing
+## Architecture
 
-# Run a task
-floo run "Add user authentication to the API"
+![Floo three-layer architecture](./docs/img/arch-overview.png)
 
-# Monitor progress
-floo status                      # snapshot of current tasks
-floo monitor                     # live progress feed
+Floo operates across three layers:
 
-# Background mode
-floo run "Refactor payment module" --detach
-floo monitor                     # watch notifications in real time
-```
+| Layer | Components | Role |
+|-------|-----------|------|
+| **Interaction** | Claude Code · Codex · OpenClaw | Human-facing agents that call `floo run` |
+| **Orchestration** | Floo CLI · Dispatcher · Router / Scope Lock | State machine, parallel scheduling, commit lock |
+| **Execution** | designer · planner · coder · reviewer · tester | Worker agents spawned per phase in tmux sessions |
 
-## Task Lifecycle
+The callback mechanism uses `tmux wait-for` — no polling, no websockets, zero latency between phases.
 
-```
-floo run "Refactor payment module"
-  │
-  ├─ Designer → design.md (requirements + scope)
-  ├─ Planner  → plan.md (subtasks in YAML)
-  │
-  ├─ Subtasks with no scope overlap → run in parallel
-  │   ├─ task-001: Coder → Reviewer → Tester ✓
-  │   ├─ task-002: Coder → Reviewer → Tester ✓
-  │   └─ task-003: (depends on task-001) → waits → Coder → Reviewer → Tester ✓
-  │
-  └─ All tasks pass → Summary Review (read-only report)
-```
+![Batch lifecycle](./docs/img/batch-lifecycle.png)
 
-**Failure handling**:
-- Reviewer fail → back to Coder (max 2 rounds)
-- Tester fail → back to Coder → Reviewer → Tester (max 2 rounds)
-- Phase crash → retry with error context (max 3 attempts)
-- All retries exhausted → pause, notify human
+---
 
 ## Project Structure
 
 ```
 floo/
-├── packages/
-│   ├── core/          # Dispatcher, adapters, scope, router, monitor
-│   ├── cli/           # CLI commands (init, run, status, cancel, monitor)
-│   └── web/           # Next.js dashboard (planned)
+├── src/
+│   ├── core/          # Dispatcher, adapters, router, scope, monitor, types
+│   └── commands/      # CLI commands (init, run, status, cancel, monitor)
 ├── skills/            # Skill templates (designer, planner, coder, reviewer, tester)
 ├── templates/         # Git hooks, config templates
-└── docs/
-    ├── design.md      # Full design document
-    └── dev-plan.md    # Development roadmap
+├── web/               # Next.js monitoring dashboard (M4, in progress)
+├── docs/
+│   ├── design.md      # Full design document
+│   └── dev-plan.md    # Development roadmap
+└── SKILL.md           # Universal agent integration file (CC / Codex / OpenClaw)
 ```
 
-## Tech Stack
+---
 
-- TypeScript monorepo (npm workspaces)
-- Node.js ESM
-- tmux (one session per agent)
-- No external dependencies beyond the AI CLI tools themselves
+## Requirements
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| macOS | 12+ | tmux session management |
+| Node.js | 18+ | ESM support required |
+| tmux | 3.3+ | `wait-for` flag required |
+| Git | any | Commit lock and scope tracking |
+
+At least one AI coding agent:
+
+| Agent | Install |
+|-------|---------|
+| [Claude Code](https://docs.anthropic.com/claude-code) | `npm install -g @anthropic-ai/claude-code` |
+| [Codex CLI](https://github.com/openai/codex) | `npm install -g @openai/codex` |
+| OpenClaw | see project docs |
+
+---
 
 ## Development Status
 
 | Milestone | Status | Description |
 |-----------|--------|-------------|
-| M1: Single task | Done | `floo init → run → status` end-to-end |
-| M2: Multi-task + quality | Done | Parallel dispatch, compile gate, detach mode, tester, batch summary |
-| M3: Operations | Planned | Lessons, config sync, health checks |
-| M4: Web UI | Planned | Next.js monitoring dashboard |
+| M1: Single task | ✅ Done | `floo init → run → status` end-to-end |
+| M2: Multi-task + quality | ✅ Done | Parallel dispatch, compile gate, detach mode, tester, batch summary |
+| M3: Operations | 🔄 In progress | Lessons, config sync, health checks |
+| M4: Web UI | 📋 Planned | Next.js monitoring dashboard |
+
+---
 
 ## Design Philosophy
 
-- **Dispatcher, not engine** — Floo orchestrates; agents do the work
-- **Elvis's pragmatism + Peter's minimalism** — tmux + file signals, no frameworks
-- **Skill templates are the product** — carefully tuned prompts, not clever code
-- **No over-engineering** — if it's not needed yet, don't build it
+> *Dispatcher, not engine. tmux + file signals, not frameworks. Skill templates are the product.*
+
+- **Headless orchestration** — Floo coordinates; agents do the work
+- **Zero-latency callbacks** — `tmux wait-for` fires on signal file creation, not a poll loop
+- **Scope-first isolation** — scope locks prevent agents from stepping on each other's commits
+- **No over-engineering** — if it's not needed yet, it's not built
+
+---
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE)
