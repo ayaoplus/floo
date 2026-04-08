@@ -3,7 +3,7 @@
  * 清理孤儿 tmux session、检测卡死任务、日志轮转
  */
 
-import { writeFile, rename, unlink, stat } from 'node:fs/promises';
+import { writeFile, readdir, rename, unlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -29,50 +29,57 @@ export interface HealthReport {
 
 /**
  * 查找并清理当前项目中已结束但 tmux session 仍存活的孤儿 session
- * 只处理当前 flooDir 管辖的任务，不触碰其他项目或外部创建的 session
+ *
+ * 判断依据完全基于本地 .floo/signals/ 文件，不做全局 tmux session name 匹配：
+ * - 有 .exit 文件 = 当前项目的 agent 已结束 → session 是残留的，可清理
+ * - 无 .exit 文件 = 不确定是否属于当前项目 → 不碰
+ * 这样即使另一个项目有同名 session（如 floo-task-001-coder），也不会被误杀
  */
 export async function cleanOrphanSessions(flooDir: string): Promise<string[]> {
-  // 收集当前项目所有 session name 及其状态
-  // 关键：同名 session（如不同 batch 的 task-001）可能一个在跑一个已结束
-  // 用 Set 分别记录：任何 batch 中有 running 的就保留，绝不误杀
-  const runningSessions = new Set<string>();   // 至少有一个 batch 中仍在跑
-  const finishedSessions = new Set<string>();  // 某个 batch 中已结束
+  // 从 .floo/signals/ 提取已结束的 {taskId}-{phase} 对
+  const signalsDir = join(flooDir, 'signals');
+  let exitFiles: string[];
+  try {
+    const entries = await readdir(signalsDir);
+    exitFiles = entries.filter(f => f.endsWith('.exit'));
+  } catch {
+    return []; // signals 目录不存在
+  }
+
+  // 排除仍在 running 的任务（有 exit 文件但任务可能在重试中）
+  const runningSessions = new Set<string>();
   const batches = await listBatches(flooDir);
   for (const batch of batches) {
     const tasks = await listTasks(flooDir, batch.id);
     for (const task of tasks) {
       if (task.status === 'running' && task.current_phase) {
         runningSessions.add(`floo-${task.id}-${task.current_phase}`);
-      } else if (task.status !== 'running') {
-        for (const phase of ['designer', 'planner', 'coder', 'reviewer', 'tester']) {
-          finishedSessions.add(`floo-${task.id}-${phase}`);
-        }
       }
     }
   }
 
-  // 候选清理集合：已结束且不在任何 batch 的 running 中
-  const candidates = new Set([...finishedSessions].filter(s => !runningSessions.has(s)));
-  if (candidates.size === 0) return [];
-
-  // 获取当前存活的 tmux session
-  let aliveSessions: Set<string>;
-  try {
-    const { stdout } = await exec('tmux', ['list-sessions', '-F', '#{session_name}']);
-    aliveSessions = new Set(stdout.trim().split('\n').filter(Boolean));
-  } catch {
-    return []; // tmux 服务未运行
+  // 候选：有 exit 文件（确认属于当前项目）且不在 running 中
+  const candidates: string[] = [];
+  for (const file of exitFiles) {
+    // exit 文件名格式：{taskId}-{phase}.exit → session 名：floo-{taskId}-{phase}
+    const base = file.replace(/\.exit$/, '');
+    const sessionName = `floo-${base}`;
+    if (!runningSessions.has(sessionName)) {
+      candidates.push(sessionName);
+    }
   }
 
-  // 只清理：候选集合中且 tmux session 仍存活的
+  if (candidates.length === 0) return [];
+
+  // 逐个检查并清理（只碰有 exit 证据的 session）
   const cleaned: string[] = [];
   for (const name of candidates) {
-    if (!aliveSessions.has(name)) continue;
-
     try {
+      await exec('tmux', ['has-session', '-t', name]);
+      // session 存在，清理它
       await exec('tmux', ['kill-session', '-t', name]);
       cleaned.push(name);
-    } catch { /* session 可能刚退出 */ }
+    } catch { /* session 不存在，无需处理 */ }
   }
 
   return cleaned;
@@ -84,24 +91,19 @@ export async function cleanOrphanSessions(flooDir: string): Promise<string[]> {
 
 /**
  * 检测状态为 running 但实际已停滞的任务
- * 与 monitor.checkTimeouts 不同：此函数额外检查 tmux session 是否还活着
+ *
+ * 判断依据：
+ * 1. 有 .exit 信号文件 → agent 已结束但状态未更新 → 确定 stale
+ * 2. 超过 timeoutMinutes 没有 heartbeat 更新 → 可能 stale
+ *
+ * 不使用全局 tmux session 列表判断存活（避免跨项目同名 session 误判）
  */
 export async function detectStaleTasks(
   flooDir: string,
   timeoutMinutes: number,
 ): Promise<Array<{ batchId: string; taskId: string; phase: string; staleSinceMinutes: number }>> {
   const stale: Array<{ batchId: string; taskId: string; phase: string; staleSinceMinutes: number }> = [];
-
-  // 获取当前存活的 tmux session 列表
-  const aliveSessions = new Set<string>();
-  try {
-    const { stdout } = await exec('tmux', ['list-sessions', '-F', '#{session_name}']);
-    for (const name of stdout.trim().split('\n')) {
-      if (name) aliveSessions.add(name);
-    }
-  } catch {
-    // tmux 服务未运行，所有 running 任务都视为可能卡死
-  }
+  const signalsDir = join(flooDir, 'signals');
 
   const batches = await listBatches(flooDir);
   for (const batch of batches) {
@@ -111,17 +113,18 @@ export async function detectStaleTasks(
     for (const task of tasks) {
       if (task.status !== 'running' || !task.current_phase) continue;
 
-      const sessionName = `floo-${task.id}-${task.current_phase}`;
       const updatedAt = new Date(task.updated_at).getTime();
       const minutesSinceUpdate = (Date.now() - updatedAt) / 60_000;
 
-      // 两种情况标记为 stale：
-      // 1. tmux session 已经不在了（任务状态没有正确更新）
-      // 2. 超过 timeoutMinutes 没有更新
-      const sessionDead = !aliveSessions.has(sessionName);
-      const timedOut = minutesSinceUpdate > timeoutMinutes;
+      // 检查 .exit 信号文件是否存在（本地文件，不会跨项目碰撞）
+      let hasExitFile = false;
+      try {
+        await stat(join(signalsDir, `${task.id}-${task.current_phase}.exit`));
+        hasExitFile = true;
+      } catch { /* 文件不存在 */ }
 
-      if (sessionDead || timedOut) {
+      // 有 exit 文件说明 agent 确实结束了；超时说明可能卡死
+      if (hasExitFile || minutesSinceUpdate > timeoutMinutes) {
         stale.push({
           batchId: batch.id,
           taskId: task.id,
