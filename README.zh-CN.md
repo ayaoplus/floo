@@ -6,7 +6,7 @@
 
 <div align="center">
 
-<img src="./docs/img/logo.png" alt="Floo" width="480" />
+<img src="./docs/img/logo.png" alt="Floo" width="320" />
 
 # Floo
 
