@@ -4,7 +4,7 @@
  * 处理正常流转、失败重试、review 循环、超时取消
  */
 
-import { readFile, writeFile, mkdir, copyFile, access, appendFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, copyFile, access, appendFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -135,6 +135,8 @@ async function collectArtifact(
     await access(src);
     await mkdir(taskDir, { recursive: true });
     await copyFile(src, dest);
+    // 复制后清理项目根目录的临时 artifact，避免垃圾积累
+    try { await unlink(src); } catch { /* 删除失败不影响主流程 */ }
     await log(flooDir, 'artifact-collected', { task: task.id, phase, file: srcFilename });
   } catch {
     // artifact 可能不存在（如 agent 失败了没产出）
@@ -152,7 +154,6 @@ async function cleanStaleArtifact(projectRoot: string, phase: Phase, taskId: str
 
   const filePath = join(projectRoot, filename);
   try {
-    const { unlink } = await import('node:fs/promises');
     await unlink(filePath);
   } catch { /* 文件不存在，忽略 */ }
 }
