@@ -435,6 +435,8 @@ export interface DispatcherOptions {
   projectRoot: string;
   config?: FlooConfig;
   adapters: Record<string, AgentAdapter>;  // runtime name → adapter
+  /** 传入 AbortSignal 支持 graceful shutdown（Ctrl+C 时停止调度新任务） */
+  signal?: AbortSignal;
 }
 
 /**
@@ -468,6 +470,15 @@ export async function runTask(
 
   let phaseIdx = startIdx;
   while (phaseIdx <= endIdx) {
+    // graceful shutdown：收到 abort 信号后不再启动新 phase
+    if (opts.signal?.aborted) {
+      task.status = 'cancelled';
+      task.current_phase = null;
+      await saveTask(flooDir, task);
+      await log(flooDir, 'aborted', { task: task.id, phase: PHASE_ORDER[phaseIdx] });
+      return task;
+    }
+
     const phase = PHASE_ORDER[phaseIdx];
 
     // scan: 自动检查 exit code + scope 合规，不派 review agent
@@ -1034,6 +1045,19 @@ async function runBatch(
 
   // 调度循环：持续 dispatch 可启动的任务，等待完成的任务
   while (pending.size > 0 || running.size > 0) {
+    // graceful shutdown：不再 dispatch 新任务，等待已 running 的完成
+    if (opts.signal?.aborted && pending.size > 0) {
+      await log(flooDir, 'batch-aborting', { pending: [...pending.keys()] });
+      for (const [, task] of pending) {
+        task.status = 'cancelled';
+        task.current_phase = null;
+        await saveTask(flooDir, task);
+        results.push(task);
+      }
+      pending.clear();
+      // 不 break：仍然等待 running 任务自然结束（runTask 内部会检查 signal）
+    }
+
     // 失败传播：依赖的任务已 failed，则当前任务也标记为 failed
     for (const [id, task] of pending) {
       if (hasDependencyFailed(task)) {

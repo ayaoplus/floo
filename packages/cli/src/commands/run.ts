@@ -112,12 +112,20 @@ export const runCommand = new Command('run')
 
     console.log('开始执行...\n');
 
+    // graceful shutdown：Ctrl+C 时通知 dispatcher 停止调度新任务
+    const ac = new AbortController();
+    process.once('SIGINT', () => {
+      console.log('\n收到 SIGINT，正在优雅停止（等待当前 phase 完成）...');
+      ac.abort();
+    });
+
     try {
       const { batch, tasks } = await createAndRun(description, startPhase, {
         projectRoot: cwd,
         config,
         adapters,
         scope: options.scope,
+        signal: ac.signal,
       });
 
       const allCompleted = tasks.every(t => t.status === 'completed');
