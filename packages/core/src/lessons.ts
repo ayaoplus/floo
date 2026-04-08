@@ -128,7 +128,9 @@ export async function addLesson(flooDir: string, lesson: Lesson): Promise<string
 
   const date = datePrefix();
   const slug = slugify(lesson.problem);
-  const id = `${date}-${slug}`;
+  // 加时间戳后缀（HHmmss）防止同日同 slug 覆盖，中文问题 slug 为空时也能唯一
+  const timeSuffix = new Date().toISOString().slice(11, 19).replace(/:/g, '');
+  const id = `${date}-${timeSuffix}-${slug}`;
   const filename = `${id}.md`;
 
   await writeFile(join(dir, filename), formatLesson(lesson));
@@ -192,44 +194,51 @@ export async function listLessons(flooDir: string): Promise<LessonRecord[]> {
  */
 export async function distillRules(flooDir: string): Promise<void> {
   const lessons = await listLessons(flooDir);
-  if (lessons.length === 0) return;
 
-  // 按标签分组
-  const tagMap = new Map<string, LessonRecord[]>();
-  for (const lesson of lessons) {
-    for (const tag of lesson.tags) {
-      const group = tagMap.get(tag) ?? [];
-      group.push(lesson);
-      tagMap.set(tag, group);
-    }
-  }
-
-  // 只保留出现 2+ 次的标签
-  const frequentTags = [...tagMap.entries()]
-    .filter(([, group]) => group.length >= 2)
-    .sort((a, b) => b[1].length - a[1].length);
-
-  if (frequentTags.length === 0) return;
-
-  // 生成 project-rules.md
+  // 生成 project-rules.md（始终写文件，即使无规则——避免下游 sync 读不到文件）
   const lines: string[] = [];
   lines.push('# Project Rules');
   lines.push('');
   lines.push('> 由 floo lessons 自动蒸馏生成，勿手动编辑。');
   lines.push('');
 
-  for (const [tag, group] of frequentTags) {
-    lines.push(`## ${tag}`);
+  if (lessons.length === 0) {
+    lines.push('暂无足够经验记录来提炼规则。继续使用 `floo learn` 记录经验。');
     lines.push('');
-
-    // 对同一标签下的 solution 去重
-    const seen = new Set<string>();
-    for (const lesson of group) {
-      if (seen.has(lesson.solution)) continue;
-      seen.add(lesson.solution);
-      lines.push(`- ${lesson.solution}`);
+  } else {
+    // 按标签分组
+    const tagMap = new Map<string, LessonRecord[]>();
+    for (const lesson of lessons) {
+      for (const tag of lesson.tags) {
+        const group = tagMap.get(tag) ?? [];
+        group.push(lesson);
+        tagMap.set(tag, group);
+      }
     }
-    lines.push('');
+
+    // 只保留出现 2+ 次的标签（模式检测）
+    const frequentTags = [...tagMap.entries()]
+      .filter(([, group]) => group.length >= 2)
+      .sort((a, b) => b[1].length - a[1].length);
+
+    if (frequentTags.length === 0) {
+      lines.push('经验记录尚未形成模式（需要同一标签出现 2 次以上）。');
+      lines.push('');
+    } else {
+      for (const [tag, group] of frequentTags) {
+        lines.push(`## ${tag}`);
+        lines.push('');
+
+        // 对同一标签下的 solution 去重
+        const seen = new Set<string>();
+        for (const lesson of group) {
+          if (seen.has(lesson.solution)) continue;
+          seen.add(lesson.solution);
+          lines.push(`- ${lesson.solution}`);
+        }
+        lines.push('');
+      }
+    }
   }
 
   const contextDir = join(flooDir, 'context');

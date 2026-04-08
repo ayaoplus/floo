@@ -3,7 +3,7 @@
  * 清理孤儿 tmux session、检测卡死任务、日志轮转
  */
 
-import { readFile, writeFile, rename, unlink, stat } from 'node:fs/promises';
+import { writeFile, rename, unlink, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -28,49 +28,50 @@ export interface HealthReport {
 // ============================================================
 
 /**
- * 查找并清理没有对应运行中任务的 floo- tmux session
- * tmux 服务未启动时静默返回空数组
+ * 查找并清理当前项目中已结束但 tmux session 仍存活的孤儿 session
+ * 只处理当前 flooDir 管辖的任务，不触碰其他项目或外部创建的 session
  */
 export async function cleanOrphanSessions(flooDir: string): Promise<string[]> {
-  // 获取所有 floo- 开头的 tmux session
-  let sessionNames: string[];
-  try {
-    const { stdout } = await exec('tmux', ['list-sessions', '-F', '#{session_name}']);
-    sessionNames = stdout
-      .trim()
-      .split('\n')
-      .filter(name => name.startsWith('floo-'));
-  } catch {
-    // tmux 服务未运行或其他错误，直接返回
-    return [];
-  }
-
-  if (sessionNames.length === 0) return [];
-
-  // 收集所有 running 状态的任务 ID，构建 session name 集合
-  const runningSessionNames = new Set<string>();
+  // 收集当前项目所有任务（含已结束的）的 session name
+  const knownSessions = new Map<string, boolean>(); // session name → 是否仍 running
   const batches = await listBatches(flooDir);
   for (const batch of batches) {
-    if (batch.status !== 'active') continue;
     const tasks = await listTasks(flooDir, batch.id);
     for (const task of tasks) {
-      if (task.status === 'running' && task.current_phase) {
-        runningSessionNames.add(`floo-${task.id}-${task.current_phase}`);
+      if (!task.current_phase && task.status !== 'running') {
+        // 已结束的任务：从 runs 记录中提取历史 session name
+        // 用 task.id 构建可能的 session name 前缀
+        // 安全做法：只标记已知的 phase 名
+        for (const phase of ['designer', 'planner', 'coder', 'reviewer', 'tester']) {
+          knownSessions.set(`floo-${task.id}-${phase}`, false);
+        }
+      } else if (task.status === 'running' && task.current_phase) {
+        knownSessions.set(`floo-${task.id}-${task.current_phase}`, true);
       }
     }
   }
 
-  // 清理没有对应运行任务的 session
+  if (knownSessions.size === 0) return [];
+
+  // 获取当前存活的 tmux session
+  let aliveSessions: Set<string>;
+  try {
+    const { stdout } = await exec('tmux', ['list-sessions', '-F', '#{session_name}']);
+    aliveSessions = new Set(stdout.trim().split('\n').filter(Boolean));
+  } catch {
+    return []; // tmux 服务未运行
+  }
+
+  // 只清理：属于当前项目 + 任务已非 running + tmux session 仍存活
   const cleaned: string[] = [];
-  for (const name of sessionNames) {
-    if (runningSessionNames.has(name)) continue;
+  for (const [name, isRunning] of knownSessions) {
+    if (isRunning) continue;             // 仍在运行，不碰
+    if (!aliveSessions.has(name)) continue; // session 已经退出了，无需清理
 
     try {
       await exec('tmux', ['kill-session', '-t', name]);
       cleaned.push(name);
-    } catch {
-      // session 可能已经自己退出了，忽略
-    }
+    } catch { /* session 可能刚退出 */ }
   }
 
   return cleaned;
