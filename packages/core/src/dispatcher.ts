@@ -92,10 +92,12 @@ function toStringArray(val: unknown): string[] {
  * 例：batchId = "2026-04-08-080748-auth" → token = "08074832"
  */
 function deriveBatchToken(batchId: string): string {
-  // 提取时间部分：batchId 格式 "yyyy-MM-dd-HHmmss-..."
-  const timePart = batchId.split('-')[3] ?? '000000';
-  const random = Math.random().toString(36).slice(2, 4); // 2 字符随机
-  return `${timePart}${random}`;
+  // batchId 格式 "yyyy-MM-dd-HHmmss-xxxx-descSlug"
+  // 提取时间部分(6字符) + 随机后缀(4字符) = 10字符 token
+  const parts = batchId.split('-');
+  const timePart = parts[3] ?? '000000';
+  const randomPart = parts[4] ?? Math.random().toString(36).slice(2, 6);
+  return `${timePart}${randomPart}`;
 }
 
 // ============================================================
@@ -802,8 +804,9 @@ async function executePhase(
     }
 
     if (exitArtifact.exit_code === -1) {
-      lastError = 'Agent was terminated externally';
+      // 被外部终止（floo cancel）→ 立即停止，不重试
       await log(flooDir, 'terminated', { task: task.id, phase, attempt });
+      return { success: false, exitArtifact };
     } else {
       try {
         lastError = await adapter.getOutput(sessionName, 30);
@@ -1200,7 +1203,8 @@ export async function createAndRun(
   const date = now.toISOString().slice(0, 10);
   const timeSlug = now.toISOString().slice(11, 19).replace(/:/g, '');
   const descSlug = description.slice(0, 30).replace(/[^a-zA-Z0-9\u4e00-\u9fff]/g, '-').replace(/-+/g, '-');
-  const batchId = `${date}-${timeSlug}-${descSlug}`;
+  const randomSuffix = Math.random().toString(36).slice(2, 6);
+  const batchId = `${date}-${timeSlug}-${randomSuffix}-${descSlug}`;
   const batchToken = deriveBatchToken(batchId);
   const mainTaskId = `${batchToken}-001`;
 
@@ -1272,6 +1276,19 @@ export async function createAndRun(
   mainTask.status = 'running';
   await saveTask(flooDir, mainTask);
 
+  /** 基础设施异常兜底：确保 task/batch 不会停留在 running/active 脏状态 */
+  async function failBatch(error: unknown): Promise<{ batch: Batch; tasks: Task[] }> {
+    await log(flooDir, 'createAndRun-crash', { batch: batchId, error: String(error) });
+    mainTask.status = 'failed';
+    mainTask.current_phase = null;
+    await saveTask(flooDir, mainTask);
+    batch.status = 'failed';
+    await saveBatch(flooDir, batch);
+    return { batch, tasks: [mainTask] };
+  }
+
+  try {
+
   // 执行 designer（如果需要）
   if (startPhase === 'designer') {
     mainTask.current_phase = 'designer';
@@ -1281,6 +1298,8 @@ export async function createAndRun(
     if (!designResult.success) {
       mainTask.status = 'failed';
       await saveTask(flooDir, mainTask);
+      batch.status = 'failed';
+      await saveBatch(flooDir, batch);
       return { batch, tasks: [mainTask] };
     }
     await collectArtifact(projectRoot, flooDir, mainTask, 'designer');
@@ -1294,6 +1313,8 @@ export async function createAndRun(
   if (!planResult.success) {
     mainTask.status = 'failed';
     await saveTask(flooDir, mainTask);
+    batch.status = 'failed';
+    await saveBatch(flooDir, batch);
     return { batch, tasks: [mainTask] };
   }
   await collectArtifact(projectRoot, flooDir, mainTask, 'planner');
@@ -1346,4 +1367,8 @@ export async function createAndRun(
   });
 
   return { batch, tasks: results };
+
+  } catch (err) {
+    return failBatch(err);
+  }
 }
