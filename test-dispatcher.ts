@@ -568,6 +568,143 @@ console.log('\n=== 17. Dispatcher：head_after 写入 exit artifact ===');
   await cleanupTestProject(dir);
 }
 
+console.log('\n=== 18. createAndRun：designer 期间 cancel → cancelled（非 failed） ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  // designer 返回 exit_code=-1（被 kill）
+  mock.setBehavior('designer', [{ exitCode: -1 }]);
+
+  const opts: DispatcherOptions & { scope?: string[] } = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await createAndRun('测试 designer cancel', 'designer', opts);
+
+  assert(result.batch.status === 'cancelled', 'batch → cancelled');
+  assert(result.tasks[0].status === 'cancelled', 'task → cancelled');
+  assert(!mock.callCounts.has('planner'), 'planner 不应启动');
+
+  // 验证通知闭环：task_completed + batch_completed 都要有
+  const { listNotifications } = await import('./packages/core/src/notifications.js');
+  const notifs = await listNotifications(join(dir, '.floo'));
+  const taskCompleted = notifs.filter(n => n.event === 'task_completed');
+  const batchCompleted = notifs.filter(n => n.event === 'batch_completed');
+  assert(taskCompleted.length >= 1, '有 task_completed 通知');
+  assert(batchCompleted.length >= 1, '有 batch_completed 通知');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 19. createAndRun：planner 期间 cancel → cancelled（非 failed） ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  // designer 正常，planner 被 kill
+  mock.setBehavior('designer', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-design.md': '# Design\nSome design.' },
+  }]);
+  mock.setBehavior('planner', [{ exitCode: -1 }]);
+
+  const opts: DispatcherOptions & { scope?: string[] } = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await createAndRun('测试 planner cancel', 'designer', opts);
+
+  assert(result.batch.status === 'cancelled', 'batch → cancelled');
+  assert(result.tasks[0].status === 'cancelled', 'task → cancelled');
+  assert(!mock.callCounts.has('coder'), 'coder 不应启动');
+
+  // 验证通知闭环
+  const { listNotifications } = await import('./packages/core/src/notifications.js');
+  const notifs = await listNotifications(join(dir, '.floo'));
+  const batchCompleted = notifs.filter(n => n.event === 'batch_completed');
+  assert(batchCompleted.length >= 1, '有 batch_completed 通知');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 20. createAndRun：designer 完成后 abort signal → 不继续 planner ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+  const ac = new AbortController();
+
+  // designer 正常完成
+  mock.setBehavior('designer', [{
+    exitCode: 0,
+    artifacts: { '{taskId}-design.md': '# Design\nDone.' },
+  }]);
+  // planner 不应被调用
+  mock.setBehavior('planner', [{ exitCode: 0 }]);
+
+  const opts: DispatcherOptions & { scope?: string[] } = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+    signal: ac.signal,
+  };
+
+  // 劫持 designer spawn：designer 完成后立即 abort
+  const origSpawn = mock.spawn.bind(mock);
+  mock.spawn = async function(spawnOpts: SpawnOptions) {
+    const result = await origSpawn(spawnOpts);
+    if (spawnOpts.phase === 'designer') {
+      ac.abort();  // 模拟 Ctrl+C 在 designer 完成后、planner 启动前
+    }
+    return result;
+  };
+
+  const result = await createAndRun('测试 abort between phases', 'designer', opts);
+
+  assert(result.batch.status === 'cancelled', 'batch → cancelled');
+  assert(result.tasks[0].status === 'cancelled', 'task → cancelled');
+  assert(!mock.callCounts.has('planner'), 'abort 后 planner 不应启动');
+
+  await cleanupTestProject(dir);
+}
+
+console.log('\n=== 21. runTask：coder 期间 cancel → cancelled 状态和通知 ===');
+
+{
+  const dir = await setupTestProject();
+  const mock = new MockAdapter();
+
+  // coder 被 kill
+  mock.setBehavior('coder', [{ exitCode: -1 }]);
+
+  const task = makeTask();
+  const opts: DispatcherOptions = {
+    projectRoot: dir,
+    config: TEST_CONFIG,
+    adapters: { claude: mock, codex: mock },
+  };
+
+  const result = await runTask(task, 'coder', opts);
+
+  assert(result.status === 'cancelled', 'task → cancelled');
+
+  // 验证 task_completed 通知存在
+  const { listNotifications } = await import('./packages/core/src/notifications.js');
+  const notifs = await listNotifications(join(dir, '.floo'));
+  const taskCompleted = notifs.filter(n => n.event === 'task_completed' && n.task_id === task.id);
+  assert(taskCompleted.length >= 1, '有 task_completed 通知');
+  assert((taskCompleted[0]?.data as any)?.status === 'cancelled', '通知状态为 cancelled');
+
+  await cleanupTestProject(dir);
+}
+
 // ============================================================
 // 结果
 // ============================================================

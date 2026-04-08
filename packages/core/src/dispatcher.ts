@@ -1299,13 +1299,29 @@ export async function createAndRun(
     await cleanStaleArtifact(projectRoot, 'designer', mainTask.id);
     const designResult = await executePhase(mainTask, 'designer', config, flooDir, projectRoot, adapters, 1);
     if (!designResult.success) {
-      mainTask.status = 'failed';
+      // 区分被外部终止（cancelled）和真正失败（failed）
+      const wasCancelled = designResult.exitArtifact?.exit_code === -1;
+      mainTask.status = wasCancelled ? 'cancelled' : 'failed';
       await saveTask(flooDir, mainTask);
-      batch.status = 'failed';
+      batch.status = wasCancelled ? 'cancelled' : 'failed';
       await saveBatch(flooDir, batch);
+      await notify(flooDir, 'task_completed', { batch_id: batchId, task_id: mainTask.id, status: mainTask.status, phase: 'designer' });
+      await notify(flooDir, 'batch_completed', { batch_id: batchId, task_id: mainTask.id, status: batch.status, total_tasks: 1, completed: 0, failed: 1 });
       return { batch, tasks: [mainTask] };
     }
     await collectArtifact(projectRoot, flooDir, mainTask, 'designer');
+
+    // designer 完成后检查 abort 信号，避免多跑 planner
+    if (opts.signal?.aborted) {
+      mainTask.status = 'cancelled';
+      mainTask.current_phase = null;
+      await saveTask(flooDir, mainTask);
+      batch.status = 'cancelled';
+      await saveBatch(flooDir, batch);
+      await notify(flooDir, 'task_completed', { batch_id: batchId, task_id: mainTask.id, status: 'cancelled', phase: 'designer' });
+      await notify(flooDir, 'batch_completed', { batch_id: batchId, task_id: mainTask.id, status: 'cancelled', total_tasks: 1, completed: 0, failed: 0 });
+      return { batch, tasks: [mainTask] };
+    }
   }
 
   // 执行 planner
@@ -1314,10 +1330,14 @@ export async function createAndRun(
   await cleanStaleArtifact(projectRoot, 'planner', mainTask.id);
   const planResult = await executePhase(mainTask, 'planner', config, flooDir, projectRoot, adapters, 2);
   if (!planResult.success) {
-    mainTask.status = 'failed';
+    // 区分被外部终止（cancelled）和真正失败（failed）
+    const wasCancelled = planResult.exitArtifact?.exit_code === -1;
+    mainTask.status = wasCancelled ? 'cancelled' : 'failed';
     await saveTask(flooDir, mainTask);
-    batch.status = 'failed';
+    batch.status = wasCancelled ? 'cancelled' : 'failed';
     await saveBatch(flooDir, batch);
+    await notify(flooDir, 'task_completed', { batch_id: batchId, task_id: mainTask.id, status: mainTask.status, phase: 'planner' });
+    await notify(flooDir, 'batch_completed', { batch_id: batchId, task_id: mainTask.id, status: batch.status, total_tasks: 1, completed: 0, failed: 1 });
     return { batch, tasks: [mainTask] };
   }
   await collectArtifact(projectRoot, flooDir, mainTask, 'planner');
