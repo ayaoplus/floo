@@ -1,6 +1,6 @@
 /**
- * Batch 1 验证脚本
- * 验证：types 导入、scope 冲突检测、commit 锁、skill 模板加载、tmux adapter
+ * Core 测试
+ * 验证：types、scope 冲突检测、commit 锁、skill 模板、tmux adapter、router、adapters
  */
 
 import {
@@ -18,7 +18,7 @@ import {
   PHASE_ORDER,
   MAX_RETRIES,
   DEFAULT_CONFIG,
-} from './src/core/index.js';
+} from '../src/core/index.js';
 import type {
   Task,
   Batch,
@@ -26,7 +26,7 @@ import type {
   ExitArtifact,
   SpawnOptions,
   Runtime,
-} from './src/core/index.js';
+} from '../src/core/index.js';
 import { writeFile, mkdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -252,7 +252,7 @@ await rm(testProjectDir, { recursive: true });
 
 console.log('\n=== 6. Router ===');
 
-import { routeTask } from './src/core/router.js';
+import { routeTask } from '../src/core/router.js';
 
 assert(routeTask('重构支付模块，支持多币种') === 'designer', '长描述默认 designer');
 assert(routeTask('fix login button bug') === 'coder', 'bug 关键词走 coder');
@@ -268,7 +268,7 @@ assert(routeTask('改个小东西', { scope: ['src/a.ts'] }) === 'coder', '有 s
 
 console.log('\n=== 7. Adapters & Dispatcher ===');
 
-import { ClaudeAdapter, CodexAdapter, createAndRun } from './src/core/index.js';
+import { ClaudeAdapter, CodexAdapter, createAndRun } from '../src/core/index.js';
 
 const claude = new ClaudeAdapter();
 assert(claude.runtime === 'claude', 'ClaudeAdapter runtime 正确');

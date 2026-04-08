@@ -4,5 +4,5 @@
     "rootDir": ".",
     "noEmit": true
   },
-  "include": ["src/**/*", "test-batch1.ts", "test-dispatcher.ts"]
+  "include": ["src/**/*", "test/**/*"]
 }
