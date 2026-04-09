@@ -121,3 +121,26 @@ batch: 2026-04-08-health-endpoint
 
 `floo.config.json`（项目根目录）控制每个角色的 runtime 和并发设置。
 `.floo/` 目录存放运行时数据，已加入 `.gitignore`。
+
+### floo config — 交互式配置向导
+
+当用户想调整 floo 的配置时，运行：
+
+```bash
+floo config
+```
+
+向导提供两种模式：
+- **Quick Start**：3个问题快速完成（并发数、review 轮数、runtime 预设）
+- **Manual**：逐项配置所有字段（角色绑定、超时、保护文件等）
+
+**触发时机**——用户说以下任意意图时，调用 `floo config`：
+- "帮我改一下并发数 / max_agents"
+- "review 轮数太多了，调少一点"
+- "把 reviewer 换成 claude"
+- "floo 的配置怎么改"
+- "我想配置一下 floo"
+- "timeout 设长一点"
+- 任何涉及修改 `floo.config.json` 字段的请求
+
+**不要**直接手动编辑 `floo.config.json`，用向导保证格式正确。
