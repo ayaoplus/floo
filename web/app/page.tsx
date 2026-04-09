@@ -54,7 +54,7 @@ export default async function DashboardPage() {
           <div className="bg-ivory rounded-xl border border-border-cream overflow-hidden">
             {recentTasks.map((task, idx) => (
               <Link
-                key={task.id}
+                key={`${task.batch_id}-${task.id}`}
                 href={`/tasks/${task.batch_id}/${task.id}`}
                 className={`flex items-center justify-between px-5 py-4 hover:bg-warm-sand/30 transition-colors ${
                   idx > 0 ? 'border-t border-border-cream' : ''
