@@ -5,7 +5,7 @@
 
 import { readFile, readdir, access } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import type { Batch, Task, RunRecord, SessionInfo } from './types';
+import type { Batch, Task, RunRecord, SessionInfo, Notification } from './types';
 
 /** 获取 .floo 目录路径（优先用环境变量，默认 ../..floo） */
 function getFlooDir(): string {
@@ -140,6 +140,51 @@ export async function listSessions(): Promise<SessionInfo[]> {
       }
     }
     return sessions;
+  } catch {
+    return [];
+  }
+}
+
+/** 列出任务的通知事件（按时间正序） */
+export async function listTaskNotifications(taskId: string): Promise<Notification[]> {
+  const notifDir = join(getFlooDir(), 'notifications');
+  if (!(await exists(notifDir))) return [];
+
+  try {
+    const entries = await readdir(notifDir);
+    const jsonFiles = entries.filter(f => f.endsWith('.json')).sort();
+    const notifications: Notification[] = [];
+
+    for (const file of jsonFiles) {
+      const notif = await readJson<Notification>(join(notifDir, file));
+      if (notif && notif.task_id === taskId) {
+        notifications.push(notif);
+      }
+    }
+    return notifications;
+  } catch {
+    return [];
+  }
+}
+
+/** 读取某个 run 的 session 输出日志 */
+export async function readRunLog(batchId: string, taskId: string, runId: string): Promise<string | null> {
+  const filePath = join(getFlooDir(), 'batches', batchId, 'tasks', taskId, 'logs', `${runId}.log`);
+  try {
+    return await readFile(filePath, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+/** 列出任务下所有可用的 run log 文件名 */
+export async function listRunLogs(batchId: string, taskId: string): Promise<string[]> {
+  const logsDir = join(getFlooDir(), 'batches', batchId, 'tasks', taskId, 'logs');
+  if (!(await exists(logsDir))) return [];
+
+  try {
+    const entries = await readdir(logsDir);
+    return entries.filter(f => f.endsWith('.log')).sort();
   } catch {
     return [];
   }

@@ -65,5 +65,28 @@ export interface SessionInfo {
   last_activity: string | null;
 }
 
+/** 通知事件类型 */
+export type NotificationEvent =
+  | 'task_started'
+  | 'phase_started'
+  | 'phase_completed'
+  | 'review_concluded'
+  | 'task_completed'
+  | 'batch_progress'
+  | 'batch_completed'
+  | 'error'
+  | 'retry';
+
+/** 通知记录 */
+export interface Notification {
+  id: string;
+  timestamp: string;
+  batch_id: string;
+  task_id: string;
+  event: NotificationEvent;
+  phase?: Phase | null;
+  data: Record<string, unknown>;
+}
+
 /** 阶段流转顺序 */
 export const PHASE_ORDER: Phase[] = ['designer', 'planner', 'coder', 'reviewer', 'tester'];
