@@ -53,6 +53,11 @@ export interface FlooConfig {
     keep_on_failure_minutes: number;
     orphan_check_interval_minutes: number;
   };
+  /** review/test 最大循环轮数（可选，老配置向前兼容） */
+  limits?: {
+    max_review_rounds: number;
+    max_test_rounds: number;
+  };
   protected_files: string[];
 }
 
@@ -242,6 +247,10 @@ export const DEFAULT_CONFIG: FlooConfig = {
     keep_on_success_minutes: 30,
     keep_on_failure_minutes: 1440, // 24h
     orphan_check_interval_minutes: 10,
+  },
+  limits: {
+    max_review_rounds: 2,
+    max_test_rounds: 2,
   },
   protected_files: ['.env', 'floo.config.json', 'CLAUDE.md', 'AGENTS.md'],
 };

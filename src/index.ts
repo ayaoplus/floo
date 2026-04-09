@@ -12,6 +12,7 @@ import { cancelCommand } from './commands/cancel.js';
 import { monitorCommand } from './commands/monitor.js';
 import { learnCommand } from './commands/learn.js';
 import { syncCommand } from './commands/sync.js';
+import { configCommand } from './commands/config.js';
 
 const program = new Command();
 
@@ -27,5 +28,6 @@ program.addCommand(cancelCommand);
 program.addCommand(monitorCommand);
 program.addCommand(learnCommand);
 program.addCommand(syncCommand);
+program.addCommand(configCommand);
 
 program.parse();

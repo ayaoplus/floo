@@ -300,6 +300,103 @@ assert(testStripQuotes('src/api/health.ts') === 'src/api/health.ts', '无引号�
 assert(testStripQuotes('"full"') === 'full', 'review_level 引号剥离');
 
 // ============================================================
+// 9. Config 向导纯函数
+// ============================================================
+
+console.log('\n=== 9. Config 向导 ===');
+
+import { applyQuickStart, applyManual, diffConfig } from '../src/commands/config.js';
+import type { QuickStartAnswers, ManualAnswers } from '../src/commands/config.js';
+
+// --- applyQuickStart ---
+
+const baseConfig = structuredClone(DEFAULT_CONFIG);
+
+// all-claude 预设：所有角色都改为 claude/sonnet
+const qs1 = applyQuickStart(baseConfig, {
+  max_agents: 2,
+  max_review_rounds: 3,
+  runtime_preset: 'all-claude',
+});
+assert(qs1.concurrency.max_agents === 2, 'QuickStart: max_agents 更新');
+assert(qs1.limits?.max_review_rounds === 3, 'QuickStart: max_review_rounds 更新');
+assert(qs1.roles.reviewer.runtime === 'claude', 'QuickStart all-claude: reviewer 改为 claude');
+assert(qs1.roles.coder.runtime === 'claude', 'QuickStart all-claude: coder 保持 claude');
+
+// all-codex 预设：所有角色改为 codex/codex-mini
+const qs2 = applyQuickStart(baseConfig, {
+  max_agents: 1,
+  max_review_rounds: 1,
+  runtime_preset: 'all-codex',
+});
+assert(qs2.roles.designer.runtime === 'codex', 'QuickStart all-codex: designer 改为 codex');
+assert(qs2.roles.coder.model === 'codex-mini', 'QuickStart all-codex: model = codex-mini');
+
+// keep 预设：roles 不变
+const qs3 = applyQuickStart(baseConfig, {
+  max_agents: 3,
+  max_review_rounds: 2,
+  runtime_preset: 'keep',
+});
+assert(qs3.roles.reviewer.runtime === 'codex', 'QuickStart keep: reviewer 保持 codex');
+assert(qs3.roles.designer.runtime === 'claude', 'QuickStart keep: designer 保持 claude');
+
+// 不修改原对象
+assert(baseConfig.concurrency.max_agents === 3, 'applyQuickStart 不修改原配置');
+
+// --- applyManual ---
+
+const manualAnswers: ManualAnswers = {
+  roles: {
+    designer:  { runtime: 'claude', model: 'opus' },
+    planner:   { runtime: 'claude', model: 'sonnet' },
+    coder:     { runtime: 'claude', model: 'sonnet' },
+    reviewer:  { runtime: 'claude', model: 'haiku' },
+    tester:    { runtime: 'codex',  model: 'codex-mini' },
+  },
+  max_agents: 2,
+  commit_lock: false,
+  timeout_minutes: 60,
+  keep_on_success_minutes: 15,
+  keep_on_failure_minutes: 720,
+  orphan_check_interval_minutes: 5,
+  max_review_rounds: 3,
+  max_test_rounds: 1,
+  extra_protected_files: ['secrets.json', '.env.local'],
+};
+
+const m1 = applyManual(baseConfig, manualAnswers);
+assert(m1.roles.designer.model === 'opus', 'Manual: designer model 更新');
+assert(m1.roles.reviewer.runtime === 'claude', 'Manual: reviewer 改为 claude');
+assert(m1.concurrency.commit_lock === false, 'Manual: commit_lock 更新');
+assert(m1.session.timeout_minutes === 60, 'Manual: timeout 更新');
+assert(m1.limits?.max_review_rounds === 3, 'Manual: max_review_rounds 更新');
+assert(m1.limits?.max_test_rounds === 1, 'Manual: max_test_rounds 更新');
+assert(m1.protected_files.includes('secrets.json'), 'Manual: 新增保护文件');
+assert(m1.protected_files.includes('.env'), 'Manual: 原有保护文件保留');
+
+// extra_protected_files 去重
+const m2 = applyManual(baseConfig, { ...manualAnswers, extra_protected_files: ['.env', 'new.txt'] });
+const envCount = m2.protected_files.filter(f => f === '.env').length;
+assert(envCount === 1, 'Manual: 保护文件不重复添加');
+
+// 不修改原对象
+assert(baseConfig.concurrency.commit_lock === true, 'applyManual 不修改原配置');
+
+// --- diffConfig ---
+
+// 无变化
+const noDiff = diffConfig(baseConfig, structuredClone(baseConfig));
+assert(noDiff.length === 0, 'diffConfig: 相同配置无变化');
+
+// 有变化
+const changed = applyQuickStart(baseConfig, { max_agents: 1, max_review_rounds: 3, runtime_preset: 'all-claude' });
+const diffs = diffConfig(baseConfig, changed);
+assert(diffs.some(d => d.includes('max_agents')), 'diffConfig: 检测到 max_agents 变化');
+assert(diffs.some(d => d.includes('max_review_rounds')), 'diffConfig: 检测到 max_review_rounds 变化');
+assert(diffs.some(d => d.includes('reviewer')), 'diffConfig: 检测到 reviewer runtime 变化');
+
+// ============================================================
 // 结果
 // ============================================================
 

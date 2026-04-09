@@ -493,6 +493,10 @@ export async function runTask(
   await saveTask(flooDir, task);
   await log(flooDir, 'dispatch', { task: task.id, start_phase: startPhase });
 
+  // 从 config.limits 读取，向前兼容老配置（没有 limits 字段时 fallback 到常量）
+  const maxReviewRounds = config.limits?.max_review_rounds ?? MAX_REVIEW_ROUNDS;
+  const maxTestRounds = config.limits?.max_test_rounds ?? MAX_TEST_ROUNDS;
+
   let reviewRounds = 0;
   let testRounds = 0;
   let runCounter = 0;
@@ -586,7 +590,7 @@ export async function runTask(
           return task;
         }
         reviewRounds++;
-        if (reviewRounds >= MAX_REVIEW_ROUNDS) {
+        if (reviewRounds >= maxReviewRounds) {
           task.status = 'failed';
           await saveTask(flooDir, task);
           await log(flooDir, 'failed', { task: task.id, reason: 'max_review_rounds', rounds: reviewRounds });
@@ -615,7 +619,7 @@ export async function runTask(
           return task;
         }
         testRounds++;
-        if (testRounds >= MAX_TEST_ROUNDS) {
+        if (testRounds >= maxTestRounds) {
           task.status = 'failed';
           await saveTask(flooDir, task);
           await log(flooDir, 'failed', { task: task.id, reason: 'max_test_rounds', rounds: testRounds });
