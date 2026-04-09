@@ -13,6 +13,7 @@ import { monitorCommand } from './commands/monitor.js';
 import { learnCommand } from './commands/learn.js';
 import { syncCommand } from './commands/sync.js';
 import { configCommand } from './commands/config.js';
+import { serveCommand } from './commands/serve.js';
 
 const program = new Command();
 
@@ -29,5 +30,6 @@ program.addCommand(monitorCommand);
 program.addCommand(learnCommand);
 program.addCommand(syncCommand);
 program.addCommand(configCommand);
+program.addCommand(serveCommand);
 
 program.parse();
