@@ -696,6 +696,33 @@ export async function runTask(
 }
 
 /**
+ * 持久化 tmux session 的完整输出到任务日志目录
+ * 供 Web UI 回放 agent 的工作过程。抓取失败不阻塞主流程。
+ * tmux capture-pane 最多取 scrollback buffer 全部内容（-S -）
+ */
+async function persistSessionOutput(
+  flooDir: string,
+  batchId: string,
+  taskId: string,
+  runId: string,
+  adapter: AgentAdapter,
+  sessionName: string,
+): Promise<void> {
+  try {
+    // 取 scrollback buffer 全部内容（最多 32000 行，足够覆盖大多数 session）
+    const output = await adapter.getOutput(sessionName, 32000);
+    if (!output.trim()) return;
+
+    const logsDir = join(flooDir, 'batches', batchId, 'tasks', taskId, 'logs');
+    await mkdir(logsDir, { recursive: true });
+    await writeFile(join(logsDir, `${runId}.log`), output);
+    await log(flooDir, 'session-output-saved', { task: taskId, run: runId, bytes: output.length });
+  } catch {
+    // session 可能已被清理，抓取失败不影响主流程
+  }
+}
+
+/**
  * 执行单个 phase（含重试逻辑）
  * 最多重试 MAX_RETRIES 次，每次带上前次错误信息
  */
@@ -781,6 +808,9 @@ async function executePhase(
     } finally {
       clearInterval(heartbeat);
     }
+
+    // 持久化 session 完整输出，供 Web UI 回放
+    await persistSessionOutput(flooDir, task.batch_id, task.id, runId, adapter, sessionName);
 
     const exitArtifact = await readExitArtifact(flooDir, task.id, phase);
 
