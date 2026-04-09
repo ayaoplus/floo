@@ -232,7 +232,7 @@ export const MAX_TEST_ROUNDS = 2;
 
 export const DEFAULT_CONFIG: FlooConfig = {
   roles: {
-    designer:  { runtime: 'claude', model: 'sonnet' },
+    designer:  { runtime: 'claude', model: 'opus' },
     planner:   { runtime: 'claude', model: 'sonnet' },
     coder:     { runtime: 'claude', model: 'sonnet' },
     reviewer:  { runtime: 'codex',  model: 'codex-mini' },
