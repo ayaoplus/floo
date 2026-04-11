@@ -19,8 +19,8 @@ function getFlooRoot(): string {
   let dir = dirname(fileURLToPath(import.meta.url));
   // 最多向上查找 10 层
   for (let i = 0; i < 10; i++) {
-    // floo 根目录的标志：同时包含 skills/ 和 packages/ 目录
-    if (existsSync(join(dir, 'skills')) && existsSync(join(dir, 'packages'))) {
+    // floo 根目录的标志：同时包含 skills/ 和 templates/ 目录
+    if (existsSync(join(dir, 'skills')) && existsSync(join(dir, 'templates'))) {
       return dir;
     }
     const parent = dirname(dir);
