@@ -19,11 +19,11 @@ const FILE_PATH_PATTERN = /(?:^|\s)([\w\-./]+\/[\w\-./]+|[\w\-]+\.\w{1,10})(?:\s
  *
  * 路由优先级：
  * 1. 用户显式指定 opts.from → 直接返回
- * 2. 有具体 scope 且描述很短 → coder（小改动）
- * 3. 描述含 bug/fix 等关键词 → coder
+ * 2. 有具体 scope 且描述很短 → coder（小改动，跳过讨论）
+ * 3. 描述含 bug/fix 等关键词 → coder（修复类明确短路）
  * 4. 描述含 review/审查 等关键词 → reviewer
- * 5. 描述简短且含文件路径 → planner（跳过 designer）
- * 6. 默认 → designer
+ * 5. 描述简短且含文件路径 → planner（已明确到文件，跳过讨论）
+ * 6. 默认 → discuss（深度挖掘需求再做设计）
  */
 export function routeTask(
   description: string,
@@ -51,11 +51,11 @@ export function routeTask(
     return 'reviewer';
   }
 
-  // 5. 描述简短且包含具体文件路径 → 从 planner 开始（跳过 designer）
+  // 5. 描述简短且包含具体文件路径 → 从 planner 开始（跳过 discuss + designer）
   if (trimmed.length < 100 && FILE_PATH_PATTERN.test(trimmed)) {
     return 'planner';
   }
 
-  // 6. 默认从 designer 开始
-  return 'designer';
+  // 6. 默认从 discuss 开始——挖透需求再设计，避免 designer 盲猜
+  return 'discuss';
 }

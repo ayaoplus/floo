@@ -8,7 +8,7 @@
 // ============================================================
 
 /** 任务执行阶段 */
-export type Phase = 'designer' | 'planner' | 'coder' | 'reviewer' | 'tester';
+export type Phase = 'discuss' | 'designer' | 'planner' | 'coder' | 'reviewer' | 'tester';
 
 /** Agent 运行时 */
 export type Runtime = 'claude' | 'codex';
@@ -53,10 +53,11 @@ export interface FlooConfig {
     keep_on_failure_minutes: number;
     orphan_check_interval_minutes: number;
   };
-  /** review/test 最大循环轮数（可选，老配置向前兼容） */
+  /** review/test/discuss 最大循环轮数（可选，老配置向前兼容） */
   limits?: {
     max_review_rounds: number;
     max_test_rounds: number;
+    max_discuss_rounds: number;
   };
   protected_files: string[];
 }
@@ -215,7 +216,7 @@ export interface AgentAdapter {
 // ============================================================
 
 /** 状态机的阶段流转顺序 */
-export const PHASE_ORDER: Phase[] = ['designer', 'planner', 'coder', 'reviewer', 'tester'];
+export const PHASE_ORDER: Phase[] = ['discuss', 'designer', 'planner', 'coder', 'reviewer', 'tester'];
 
 /** 最大重试次数 */
 export const MAX_RETRIES = 3;
@@ -226,12 +227,16 @@ export const MAX_REVIEW_ROUNDS = 2;
 /** 最大测试轮数（tester fail → coder → reviewer → tester） */
 export const MAX_TEST_ROUNDS = 2;
 
+/** 最大 discuss 轮数（designer blocker → discuss → designer） */
+export const MAX_DISCUSS_ROUNDS = 2;
+
 // ============================================================
 // 默认配置
 // ============================================================
 
 export const DEFAULT_CONFIG: FlooConfig = {
   roles: {
+    discuss:   { runtime: 'claude', model: 'opus' },
     designer:  { runtime: 'claude', model: 'opus' },
     planner:   { runtime: 'claude', model: 'sonnet' },
     coder:     { runtime: 'claude', model: 'sonnet' },
@@ -251,6 +256,7 @@ export const DEFAULT_CONFIG: FlooConfig = {
   limits: {
     max_review_rounds: 2,
     max_test_rounds: 2,
+    max_discuss_rounds: 2,
   },
   protected_files: ['.env', 'floo.config.json', 'CLAUDE.md', 'AGENTS.md'],
 };

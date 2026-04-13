@@ -54,10 +54,13 @@ function assert(condition: boolean, msg: string) {
 
 console.log('\n=== 1. Types 导入 ===');
 
-assert(PHASE_ORDER.length === 5, 'PHASE_ORDER 有 5 个阶段（含 tester）');
-assert(PHASE_ORDER[0] === 'designer', '第一个阶段是 designer');
+assert(PHASE_ORDER.length === 6, 'PHASE_ORDER 有 6 个阶段（discuss → tester）');
+assert(PHASE_ORDER[0] === 'discuss', '第一个阶段是 discuss');
+assert(PHASE_ORDER[1] === 'designer', '第二个阶段是 designer');
 assert(MAX_RETRIES === 3, 'MAX_RETRIES = 3');
 assert(DEFAULT_CONFIG.roles.reviewer.runtime === 'codex', 'Reviewer 默认用 codex');
+assert(DEFAULT_CONFIG.roles.discuss !== undefined, 'Discuss role 有默认绑定');
+assert(DEFAULT_CONFIG.limits?.max_discuss_rounds === 2, 'max_discuss_rounds 默认 2');
 
 // 验证类型可用（编译时检查）
 const mockTask: Task = {
@@ -254,13 +257,17 @@ console.log('\n=== 6. Router ===');
 
 import { routeTask } from '../src/core/router.js';
 
-assert(routeTask('重构支付模块，支持多币种') === 'designer', '长描述默认 designer');
+assert(routeTask('重构支付模块，支持多币种') === 'discuss', '长描述默认走 discuss（M2 新默认）');
 assert(routeTask('fix login button bug') === 'coder', 'bug 关键词走 coder');
 assert(routeTask('修复登录报错') === 'coder', '中文 bug 关键词走 coder');
 assert(routeTask('review src/api/') === 'reviewer', 'review 关键词走 reviewer');
 assert(routeTask('给 src/api/health.ts 加 version') === 'planner', '短描述+文件路径走 planner');
 assert(routeTask('', { from: 'coder' }) === 'coder', '显式覆盖生效');
+assert(routeTask('', { from: 'discuss' }) === 'discuss', '显式 --from discuss 生效');
 assert(routeTask('改个小东西', { scope: ['src/a.ts'] }) === 'coder', '有 scope+短描述走 coder');
+// 新增：确保短路规则优先级高于 discuss 默认
+assert(routeTask('bug: 崩溃了') === 'coder', 'bug 短路不被 discuss 拦截');
+assert(routeTask('审查 src/core 模块') === 'reviewer', 'review 短路不被 discuss 拦截');
 
 // ============================================================
 // 7. Batch 2: Adapters + Dispatcher 导入
@@ -348,6 +355,7 @@ assert(baseConfig.concurrency.max_agents === 3, 'applyQuickStart 不修改原配
 
 const manualAnswers: ManualAnswers = {
   roles: {
+    discuss:   { runtime: 'claude', model: 'opus' },
     designer:  { runtime: 'claude', model: 'opus' },
     planner:   { runtime: 'claude', model: 'sonnet' },
     coder:     { runtime: 'claude', model: 'sonnet' },

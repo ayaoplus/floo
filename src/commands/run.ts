@@ -24,7 +24,7 @@ const exec = promisify(execFile);
 export const runCommand = new Command('run')
   .description('创建并执行任务')
   .argument('<description>', '任务描述')
-  .option('--from <phase>', '指定起始阶段 (designer/planner/coder/reviewer)')
+  .option('--from <phase>', '指定起始阶段 (discuss/designer/planner/coder/reviewer/tester)')
   .option('--scope <files...>', '指定文件 scope')
   .option('--detach', '后台运行，立即返回')
   .action(async (description: string, options: { from?: string; scope?: string[]; detach?: boolean }) => {

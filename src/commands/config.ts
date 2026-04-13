@@ -52,7 +52,7 @@ export function applyQuickStart(config: FlooConfig, answers: QuickStartAnswers):
   next.concurrency.max_agents = answers.max_agents;
 
   // 确保 limits 字段存在
-  next.limits ??= { max_review_rounds: 2, max_test_rounds: 2 };
+  next.limits ??= { max_review_rounds: 2, max_test_rounds: 2, max_discuss_rounds: 2 };
   next.limits.max_review_rounds = answers.max_review_rounds;
 
   if (answers.runtime_preset === 'all-claude') {
@@ -83,7 +83,7 @@ export function applyManual(config: FlooConfig, answers: ManualAnswers): FlooCon
   next.session.keep_on_failure_minutes = answers.keep_on_failure_minutes;
   next.session.orphan_check_interval_minutes = answers.orphan_check_interval_minutes;
 
-  next.limits ??= { max_review_rounds: 2, max_test_rounds: 2 };
+  next.limits ??= { max_review_rounds: 2, max_test_rounds: 2, max_discuss_rounds: 2 };
   next.limits.max_review_rounds = answers.max_review_rounds;
   next.limits.max_test_rounds = answers.max_test_rounds;
 
