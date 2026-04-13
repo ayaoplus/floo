@@ -103,39 +103,47 @@ export const initCommand = new Command('init')
       console.log('  警告：无法更新 .gitignore:', err instanceof Error ? err.message : err);
     }
 
-    // 5. 安装 post-commit git hook（编译门禁）
-    const FLOO_HOOK_MARKER = 'FLOO_POST_COMMIT_HOOK';
-    try {
-      const gitHooksDir = join(cwd, '.git', 'hooks');
-      const hookDest = join(gitHooksDir, 'post-commit');
-      const hookSrc = join(flooRoot, 'templates', 'post-commit.sh');
-
-      let shouldInstall = false;
+    // 5. 安装 git hooks（编译门禁）
+    //   - post-commit：agent 在 floo tmux session 内 commit 后跑 tsc，失败则 soft reset
+    //   - pre-commit： 人工（非 floo session）commit 前跑 tsc，失败则拒绝
+    // 两个 hook 用 session 归属区分作用域，避免同一次 commit 双触发
+    const HOOKS_TO_INSTALL: Array<{ name: string; src: string; marker: string; label: string }> = [
+      { name: 'post-commit', src: 'post-commit.sh', marker: 'FLOO_POST_COMMIT_HOOK', label: 'agent 编译门禁' },
+      { name: 'pre-commit',  src: 'pre-commit.sh',  marker: 'FLOO_PRE_COMMIT_HOOK',  label: '人工编译门禁' },
+    ];
+    for (const hook of HOOKS_TO_INSTALL) {
       try {
-        const existing = await readFile(hookDest, 'utf-8');
-        if (existing.includes(FLOO_HOOK_MARKER)) {
-          // 是 floo 的 hook，覆盖更新
+        const gitHooksDir = join(cwd, '.git', 'hooks');
+        const hookDest = join(gitHooksDir, hook.name);
+        const hookSrc = join(flooRoot, 'templates', hook.src);
+
+        let shouldInstall = false;
+        try {
+          const existing = await readFile(hookDest, 'utf-8');
+          if (existing.includes(hook.marker)) {
+            // 是 floo 的 hook，覆盖更新
+            shouldInstall = true;
+          } else {
+            console.log(`  .git/hooks/${hook.name} 已存在（非 floo），跳过`);
+          }
+        } catch {
+          // 文件不存在，安装
           shouldInstall = true;
-        } else {
-          console.log('  .git/hooks/post-commit 已存在（非 floo），跳过');
+        }
+
+        if (shouldInstall) {
+          try {
+            await access(hookSrc);
+            await copyFile(hookSrc, hookDest);
+            await chmod(hookDest, 0o755);
+            console.log(`✓ 安装 ${hook.name} hook（${hook.label}）`);
+          } catch {
+            console.log(`  警告：找不到 ${hook.src} 模板，跳过安装`);
+          }
         }
       } catch {
-        // 文件不存在，安装
-        shouldInstall = true;
+        console.log(`  警告：无法安装 ${hook.name} hook（可能不是 git 仓库）`);
       }
-
-      if (shouldInstall) {
-        try {
-          await access(hookSrc);
-          await copyFile(hookSrc, hookDest);
-          await chmod(hookDest, 0o755);
-          console.log('✓ 安装 post-commit hook（编译门禁）');
-        } catch {
-          console.log('  警告：找不到 hook 模板，跳过安装');
-        }
-      }
-    } catch {
-      console.log('  警告：无法安装 git hook（可能不是 git 仓库）');
     }
 
     // 6. 安装 floo SKILL.md 到 agent 发现目录
