@@ -29,6 +29,7 @@ import {
   MAX_RETRIES,
   MAX_REVIEW_ROUNDS,
   MAX_TEST_ROUNDS,
+  MAX_DISCUSS_ROUNDS,
   DEFAULT_CONFIG,
 } from './types.js';
 
@@ -106,11 +107,15 @@ function deriveBatchToken(batchId: string): string {
 
 /** phase 对应的 artifact 基础名（不含 taskId 前缀） */
 const PHASE_ARTIFACT_BASES: Partial<Record<Phase, string>> = {
+  discuss: 'context',
   designer: 'design',
   planner: 'plan',
   reviewer: 'review',
   tester: 'test-report',
 };
+
+/** designer 的可选反向质疑产物（不在 PHASE_ARTIFACT_BASES 里，单独处理） */
+const DESIGNER_QUESTIONS_BASE = 'design-questions';
 
 /**
  * 获取 projectRoot 中的 artifact 文件名（带 taskId 前缀，防止并行覆盖）
@@ -170,6 +175,116 @@ async function cleanStaleArtifact(projectRoot: string, phase: Phase, taskId: str
   try {
     await unlink(filePath);
   } catch { /* 文件不存在，忽略 */ }
+}
+
+/**
+ * 清理 designer 可选的 design-questions.md（飞轮重跑 designer 前用）
+ * 避免读到上一轮残留的反向质疑，干扰本轮判断
+ */
+async function cleanStaleDesignQuestions(projectRoot: string, taskId: string): Promise<void> {
+  const filePath = join(projectRoot, `${taskId}-${DESIGNER_QUESTIONS_BASE}.md`);
+  try {
+    await unlink(filePath);
+  } catch { /* 文件不存在，忽略 */ }
+}
+
+/**
+ * 收集 designer 可选的 design-questions.md 到任务目录
+ * 返回是否成功收集（用于判断 designer 是否走了反向质疑分支）
+ */
+async function collectDesignQuestions(
+  projectRoot: string,
+  flooDir: string,
+  task: Task,
+): Promise<boolean> {
+  const src = join(projectRoot, `${task.id}-${DESIGNER_QUESTIONS_BASE}.md`);
+  const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
+  const dest = join(taskDir, `${DESIGNER_QUESTIONS_BASE}.md`);
+
+  try {
+    await access(src);
+    await mkdir(taskDir, { recursive: true });
+    await copyFile(src, dest);
+    try { await unlink(src); } catch { /* 清理失败不影响 */ }
+    await log(flooDir, 'design-questions-collected', { task: task.id });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 读取 design-questions.md 判断是否存在 blocker 级问题
+ * 用 YAML 解析 questions 数组，任一 severity === 'blocker' 即返回 true
+ * 容错：文件不存在 / 无 YAML / 解析失败 → 返回 false（保守走完设计流程）
+ */
+async function hasBlockerQuestions(flooDir: string, task: Task): Promise<boolean> {
+  const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
+  const filePath = join(taskDir, `${DESIGNER_QUESTIONS_BASE}.md`);
+  let content: string;
+  try {
+    content = await readFile(filePath, 'utf-8');
+  } catch {
+    return false;
+  }
+
+  // 提取 ```yaml ... ``` 代码块（与 plan 解析保持一致的宽容度）
+  const codeBlockMatch = content.match(/```ya?ml\s*\n([\s\S]*?)```/);
+  const yamlContent = codeBlockMatch ? codeBlockMatch[1] : content;
+
+  let parsed: unknown;
+  try {
+    parsed = parseYaml(yamlContent);
+  } catch {
+    return false;
+  }
+
+  if (!parsed || typeof parsed !== 'object') return false;
+  const questions = (parsed as Record<string, unknown>).questions;
+  if (!Array.isArray(questions)) return false;
+
+  return questions.some(q => {
+    if (!q || typeof q !== 'object') return false;
+    const sev = String((q as Record<string, unknown>).severity ?? '').toLowerCase();
+    return sev === 'blocker';
+  });
+}
+
+/**
+ * 达到 max_discuss_rounds 仍未收敛时的降级兜底
+ * 如果 designer 最后一轮产出的是 design-questions.md（没有 design.md），
+ * 把 questions 内容作为降级 design.md 写入，保证 planner 有输入可读
+ */
+async function fallbackDesignFromQuestions(
+  projectRoot: string,
+  flooDir: string,
+  task: Task,
+): Promise<void> {
+  const taskDir = join(flooDir, 'batches', task.batch_id, 'tasks', task.id);
+  let questions = '';
+  try {
+    questions = await readFile(join(taskDir, `${DESIGNER_QUESTIONS_BASE}.md`), 'utf-8');
+  } catch { /* 没有 questions 文件 */ }
+
+  const fallback = `# 设计方案（降级产出）
+
+## 说明
+
+已达到最大 discuss 轮数（${MAX_DISCUSS_ROUNDS}），discuss ↔ designer 飞轮未收敛。
+按现有 context.md 推进，以下 blocker 问题未解决，planner 需要谨慎处理或继续追问：
+
+${questions}
+
+## 方案
+
+**警告：本设计是降级产出，未解决 blocker 级决策冲突。**
+Planner 应将 open_questions 当成风险逐条评估，并在必要时终止任务要求用户介入。
+`;
+
+  const srcFilename = artifactFilename('designer', task.id);
+  if (!srcFilename) return;
+  await writeFile(join(projectRoot, srcFilename), fallback);
+  await log(flooDir, 'design-fallback-written', { task: task.id });
 }
 
 /** 解析后的子任务定义 */
@@ -383,6 +498,29 @@ async function buildPrompt(
     try {
       vars.design_doc = await readFile(join(taskDir, 'design.md'), 'utf-8');
     } catch { /* designer 可能被跳过 */ }
+  }
+
+  // discuss 阶段：读取 designer 的反向质疑作为第二轮 discuss 的输入（若存在）
+  if (phase === 'discuss') {
+    try {
+      vars.design_questions = await readFile(join(taskDir, `${DESIGNER_QUESTIONS_BASE}.md`), 'utf-8');
+    } catch {
+      vars.design_questions = '（首轮 discuss，无 designer 反馈）';
+    }
+    // project_context 由调用方通过 extraVars 传入，这里兜底
+    if (!vars.project_context) vars.project_context = '（未提供项目背景，可读仓库 README / CLAUDE.md 自行了解）';
+    // round 由调用方通过 extraVars 传入，兜底为 "1"
+    if (!vars.round) vars.round = '1';
+  }
+
+  // designer 阶段：读取 context.md 作为主要输入；定义反向质疑的输出文件名
+  if (phase === 'designer') {
+    try {
+      vars.context_doc = await readFile(join(taskDir, 'context.md'), 'utf-8');
+    } catch {
+      vars.context_doc = '（discuss 阶段被跳过，无 context 文档，你需要基于 description 自行判断 scope 和验收标准）';
+    }
+    vars.questions_output_file = `${task.id}-${DESIGNER_QUESTIONS_BASE}.md`;
   }
 
   if (phase === 'coder') {
@@ -734,6 +872,7 @@ async function executePhase(
   projectRoot: string,
   adapters: Record<string, AgentAdapter>,
   runCounter: number,
+  callerExtraVars?: TemplateVars,
 ): Promise<{ success: boolean; exitArtifact?: ExitArtifact }> {
   const binding = task.role_overrides?.[phase] ?? config.roles[phase];
   const adapter = adapters[binding.runtime];
@@ -747,7 +886,7 @@ async function executePhase(
     // Fix #4: runId 包含 attempt，避免重试覆盖
     const runId = `${String(runCounter).padStart(3, '0')}-${phase}-${attempt}`;
 
-    const extraVars: TemplateVars = {};
+    const extraVars: TemplateVars = { ...callerExtraVars };
     if (attempt > 1 && lastError) {
       extraVars.previous_error = lastError;
     }
@@ -1321,40 +1460,113 @@ export async function createAndRun(
     return { batch, tasks: [result] };
   }
 
-  // 从 designer 或 planner 开始：先跑前置 phase 到 planner 完成
+  // 从 discuss / designer / planner 开始：先跑前置 phase 到 planner 完成
   const adapters = opts.adapters;
   mainTask.status = 'running';
   await saveTask(flooDir, mainTask);
 
-  // 执行 designer（如果需要）
-  if (startPhase === 'designer') {
-    mainTask.current_phase = 'designer';
-    await saveTask(flooDir, mainTask);
-    await cleanStaleArtifact(projectRoot, 'designer', mainTask.id);
-    const designResult = await executePhase(mainTask, 'designer', config, flooDir, projectRoot, adapters, 1);
-    if (!designResult.success) {
-      // 区分被外部终止（cancelled）和真正失败（failed）
-      const wasCancelled = designResult.exitArtifact?.exit_code === -1;
-      mainTask.status = wasCancelled ? 'cancelled' : 'failed';
-      await saveTask(flooDir, mainTask);
-      batch.status = wasCancelled ? 'cancelled' : 'failed';
-      await saveBatch(flooDir, batch);
-      await notify(flooDir, 'task_completed', { batch_id: batchId, task_id: mainTask.id, status: mainTask.status, phase: 'designer' });
-      await notify(flooDir, 'batch_completed', { batch_id: batchId, task_id: mainTask.id, status: batch.status, total_tasks: 1, completed: 0, failed: 1 });
-      return { batch, tasks: [mainTask] };
-    }
-    await collectArtifact(projectRoot, flooDir, mainTask, 'designer');
+  // runCounter 跨 phase 递增，保证 runs/ 目录下每条记录的 ID 有序
+  let preRunCounter = 0;
 
-    // designer 完成后检查 abort 信号，避免多跑 planner
-    if (opts.signal?.aborted) {
-      mainTask.status = 'cancelled';
-      mainTask.current_phase = null;
+  /** 任一前置 phase 失败时的统一兜底 */
+  const failOnPhase = async (
+    exitCode: number | undefined,
+    phase: Phase,
+  ): Promise<{ batch: Batch; tasks: Task[] }> => {
+    const wasCancelled = exitCode === -1;
+    mainTask.status = wasCancelled ? 'cancelled' : 'failed';
+    await saveTask(flooDir, mainTask);
+    batch.status = wasCancelled ? 'cancelled' : 'failed';
+    await saveBatch(flooDir, batch);
+    await notify(flooDir, 'task_completed', { batch_id: batchId, task_id: mainTask.id, status: mainTask.status, phase });
+    await notify(flooDir, 'batch_completed', { batch_id: batchId, task_id: mainTask.id, status: batch.status, total_tasks: 1, completed: 0, failed: 1 });
+    return { batch, tasks: [mainTask] };
+  };
+
+  /** 用户 Ctrl+C 时的统一兜底 */
+  const cancelAndReturn = async (phase: Phase): Promise<{ batch: Batch; tasks: Task[] }> => {
+    mainTask.status = 'cancelled';
+    mainTask.current_phase = null;
+    await saveTask(flooDir, mainTask);
+    batch.status = 'cancelled';
+    await saveBatch(flooDir, batch);
+    await notify(flooDir, 'task_completed', { batch_id: batchId, task_id: mainTask.id, status: 'cancelled', phase });
+    await notify(flooDir, 'batch_completed', { batch_id: batchId, task_id: mainTask.id, status: 'cancelled', total_tasks: 1, completed: 0, failed: 0 });
+    return { batch, tasks: [mainTask] };
+  };
+
+  // 执行 discuss + designer 飞轮（如果 startPhase 落在 discuss 或 designer）
+  if (startPhase === 'discuss' || startPhase === 'designer') {
+    const maxDiscussRounds = config.limits?.max_discuss_rounds ?? MAX_DISCUSS_ROUNDS;
+    // 从 discuss 开始：首轮必跑；从 designer 开始：说明用户自备 context，首轮不跑 discuss
+    let discussRound = startPhase === 'discuss' ? 0 : 1;
+    let designerRound = 0;
+
+    // 飞轮主循环：discuss → designer，designer 若产出 blocker 级 questions 则回 discuss
+    while (true) {
+      if (opts.signal?.aborted) return cancelAndReturn(designerRound > 0 ? 'designer' : 'discuss');
+
+      // 是否需要跑 discuss：首轮（startPhase=discuss）或 designer 反馈回来
+      const needDiscuss = (startPhase === 'discuss' && discussRound === 0) || designerRound > 0;
+      if (needDiscuss) {
+        if (discussRound >= maxDiscussRounds) {
+          // 达到最大轮数仍被 designer 反向质疑 → 降级：把 design-questions 转成 design.md 兜底
+          await log(flooDir, 'discuss-max-rounds-exceeded', { task: mainTask.id, rounds: discussRound });
+          await fallbackDesignFromQuestions(projectRoot, flooDir, mainTask);
+          await collectArtifact(projectRoot, flooDir, mainTask, 'designer');
+          break;
+        }
+        discussRound++;
+        mainTask.current_phase = 'discuss';
+        await saveTask(flooDir, mainTask);
+        await cleanStaleArtifact(projectRoot, 'discuss', mainTask.id);
+        preRunCounter++;
+        const discussResult = await executePhase(
+          mainTask, 'discuss', config, flooDir, projectRoot, adapters, preRunCounter,
+          { round: String(discussRound) },
+        );
+        if (!discussResult.success) {
+          return failOnPhase(discussResult.exitArtifact?.exit_code, 'discuss');
+        }
+        await collectArtifact(projectRoot, flooDir, mainTask, 'discuss');
+        if (opts.signal?.aborted) return cancelAndReturn('discuss');
+      }
+
+      // 跑 designer
+      designerRound++;
+      mainTask.current_phase = 'designer';
       await saveTask(flooDir, mainTask);
-      batch.status = 'cancelled';
-      await saveBatch(flooDir, batch);
-      await notify(flooDir, 'task_completed', { batch_id: batchId, task_id: mainTask.id, status: 'cancelled', phase: 'designer' });
-      await notify(flooDir, 'batch_completed', { batch_id: batchId, task_id: mainTask.id, status: 'cancelled', total_tasks: 1, completed: 0, failed: 0 });
-      return { batch, tasks: [mainTask] };
+      await cleanStaleArtifact(projectRoot, 'designer', mainTask.id);
+      await cleanStaleDesignQuestions(projectRoot, mainTask.id);
+      preRunCounter++;
+      const designResult = await executePhase(mainTask, 'designer', config, flooDir, projectRoot, adapters, preRunCounter);
+      if (!designResult.success) {
+        return failOnPhase(designResult.exitArtifact?.exit_code, 'designer');
+      }
+
+      // designer 可能产出 design.md 或 design-questions.md（或两者）
+      const hadQuestions = await collectDesignQuestions(projectRoot, flooDir, mainTask);
+      await collectArtifact(projectRoot, flooDir, mainTask, 'designer');
+
+      if (opts.signal?.aborted) return cancelAndReturn('designer');
+
+      // 检查是否有 blocker 级反向质疑 → 触发回 discuss
+      if (hadQuestions && await hasBlockerQuestions(flooDir, mainTask)) {
+        await log(flooDir, 'discuss-rollback', {
+          task: mainTask.id, designer_round: designerRound, next_discuss_round: discussRound + 1,
+        });
+        continue;
+      }
+
+      // 没有 blocker：正常完成（若 designer 违反约束只产出了 non-blocker questions 没产出 design.md，兜底）
+      const taskDir = join(flooDir, 'batches', batchId, 'tasks', mainTask.id);
+      const designPresent = await access(join(taskDir, 'design.md')).then(() => true).catch(() => false);
+      if (!designPresent) {
+        await log(flooDir, 'designer-missing-design-md', { task: mainTask.id });
+        await fallbackDesignFromQuestions(projectRoot, flooDir, mainTask);
+        await collectArtifact(projectRoot, flooDir, mainTask, 'designer');
+      }
+      break;
     }
   }
 
@@ -1362,7 +1574,8 @@ export async function createAndRun(
   mainTask.current_phase = 'planner';
   await saveTask(flooDir, mainTask);
   await cleanStaleArtifact(projectRoot, 'planner', mainTask.id);
-  const planResult = await executePhase(mainTask, 'planner', config, flooDir, projectRoot, adapters, 2);
+  preRunCounter++;
+  const planResult = await executePhase(mainTask, 'planner', config, flooDir, projectRoot, adapters, preRunCounter);
   if (!planResult.success) {
     // 区分被外部终止（cancelled）和真正失败（failed）
     const wasCancelled = planResult.exitArtifact?.exit_code === -1;
