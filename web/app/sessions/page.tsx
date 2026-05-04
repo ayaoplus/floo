@@ -7,6 +7,7 @@ import { listSessions } from '@/lib/floo';
 import { PhaseBadge } from '@/components/phase-badge';
 import { EmptyState } from '@/components/empty-state';
 import { formatElapsed, formatRelative } from '@/components/duration';
+import { AutoRefresh } from '@/components/auto-refresh';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,12 +19,15 @@ export default async function SessionsPage() {
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-10">
-      {/* 标题 */}
-      <div className="mb-8">
-        <h1 className="font-serif text-3xl font-medium text-near-black mb-2">Sessions</h1>
-        <p className="text-olive-gray text-sm">
-          {aliveSessions.length} active, {deadSessions.length} terminated
-        </p>
+      {/* 标题 + 自动刷新 */}
+      <div className="mb-8 flex items-start justify-between">
+        <div>
+          <h1 className="font-serif text-3xl font-medium text-near-black mb-2">Sessions</h1>
+          <p className="text-olive-gray text-sm">
+            {aliveSessions.length} active, {deadSessions.length} terminated
+          </p>
+        </div>
+        <AutoRefresh intervalMs={5000} />
       </div>
 
       {sessions.length === 0 ? (

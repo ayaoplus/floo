@@ -10,6 +10,8 @@ import { StatusBadge } from '@/components/status-badge';
 import { PhaseBadge, PhaseProgress } from '@/components/phase-badge';
 import { RuntimeBadge } from '@/components/runtime-badge';
 import { Duration, formatRelative } from '@/components/duration';
+import { AutoRefresh } from '@/components/auto-refresh';
+import { CancelButton } from '@/components/cancel-button';
 import type { RunRecord, Notification } from '@/lib/types';
 
 export const dynamic = 'force-dynamic';
@@ -57,14 +59,23 @@ export default async function TaskDetailPage({
         <span className="font-mono text-near-black">{taskId}</span>
       </nav>
 
-      {/* 标题区域 */}
-      <div className="mb-8">
-        <div className="flex items-center gap-3 mb-2">
-          <h1 className="font-serif text-2xl font-medium text-near-black">{taskId}</h1>
-          <StatusBadge status={task.status} />
-          {task.current_phase && <PhaseBadge phase={task.current_phase} />}
+      {/* 标题区域 + 操作 */}
+      <div className="mb-8 flex items-start justify-between gap-4">
+        <div className="flex-1">
+          <div className="flex items-center gap-3 mb-2">
+            <h1 className="font-serif text-2xl font-medium text-near-black">{taskId}</h1>
+            <StatusBadge status={task.status} />
+            {task.current_phase && <PhaseBadge phase={task.current_phase} />}
+          </div>
+          <p className="text-olive-gray">{task.description}</p>
         </div>
-        <p className="text-olive-gray">{task.description}</p>
+        <div className="flex flex-col items-end gap-2 shrink-0">
+          {/* 仅 running 时刷新有意义,但保留刷新让用户看到状态从 running → completed 的过渡 */}
+          <AutoRefresh intervalMs={task.status === 'running' ? 3000 : 10000} />
+          {task.status === 'running' && (
+            <CancelButton batchId={batchId} taskId={taskId} />
+          )}
+        </div>
       </div>
 
       <div className="grid md:grid-cols-3 gap-8">

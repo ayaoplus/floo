@@ -58,26 +58,25 @@ Delivered:
 
 ### M4: Web UI
 
-Status: In progress
+Status: Done
 
 Delivered:
 
-- `web/` Next.js app;
-- `floo serve`;
-- dashboard page;
-- task list page;
-- session page;
-- task detail page;
-- API routes for batches, tasks, sessions, artifacts, and logs;
-- shared Web UI data access in `web/lib/floo.ts`.
+- `web/` Next.js 16 + React 19 app;
+- `floo serve` 命令;
+- dashboard 页面(StatCard + Health card + Recent activity + Batches);
+- task list 页面(批次分组 + 状态/搜索/批次过滤);
+- session 页面;
+- task detail 页面(metadata + phase progress + run history + artifacts + logs);
+- API routes:`/api/batches`, `/api/tasks`, `/api/tasks/[batchId]/[taskId]` (含 logs subpath), `/api/sessions`, `/api/health`, `/api/tasks/[batchId]/[taskId]/cancel`;
+- 客户端组件:`AutoRefresh`(轮询 + 暂停切换), `FilterBar`(URL search params 同步), `CancelButton`(POST + router.refresh);
+- 数据层独立于 src/core(`web/lib/floo.ts` + `web/lib/health.ts` + `web/lib/cancel.ts`),保持 web 部署灵活。
 
-Remaining:
+决策(M4 收尾):
 
-- polish dashboard information density;
-- add richer filtering/search;
-- add live refresh or SSE;
-- expose health-check state;
-- decide whether the UI stays read-only or gains explicit operations such as retry/cancel.
+- **Live refresh**:走客户端 `setInterval` + `router.refresh()`,不引入 SSE。理由:Floo 是单人本机工具,5 秒轮询代价低;SSE 在 Next 16 streaming 模式下的部署边界更复杂,收益不抵成本。标签页隐藏时自动暂停。
+- **Health check**:UI 用 `web/lib/health.ts` 的轻量只读派生(从 listAllTasks 算 stale + inconsistent),不调 `src/core/health.runHealthCheck`(后者会 kill orphan tmux 与轮转日志,有副作用,只适合 CLI 触发)。
+- **Read-only vs operations**:UI 加了 cancel 操作(running 任务可取消,kill tmux + git checkout 回滚 scope 内 unstaged + 标 cancelled);retry 暂不做,原因是 retry 需要 spawn 完整的 dispatcher 进程,部署形态与 cancel 不同,留给后续 milestone 评估。
 
 ## Planned Milestones (已迁移至 refactor-plan.md)
 
