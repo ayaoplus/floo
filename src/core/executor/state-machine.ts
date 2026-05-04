@@ -176,7 +176,7 @@ async function runStateMachine(
         state.reviewRounds = next.reviewRounds;
         // Step 6: retry 时生成 plan-patch 落盘 + 更新 plan.yaml(plan 演化 ledger,
         // 双轨道——执行仍走 RunState.rollback)
-        await emitRetryPatch(flooDir, task, step.id, 'reviewer_fail', next.reviewRounds, ['coder', 'reviewer']);
+        await emitRetryPatch(flooDir, task, step.id, 'reviewer_fail', next.reviewRounds, ['coder', 'reviewer'], config);
         if (!rollbackToPhase(state, 'coder')) {
           // coder 不在 step 列表里(--from reviewer),其实已被 handleReviewerVerdict 标 fail 走前面
           // 这里只是兜底:若意外进入,直接退出避免死循环
@@ -195,7 +195,7 @@ async function runStateMachine(
         state.testRounds = next.testRounds;
         state.reviewRounds = 0;  // 重置 review 轮数,新一轮 coder→reviewer→tester
         // Step 6: tester fail 重跑 coder→reviewer→tester,patch 含三个新 step
-        await emitRetryPatch(flooDir, task, step.id, 'tester_fail', next.testRounds, ['coder', 'reviewer', 'tester']);
+        await emitRetryPatch(flooDir, task, step.id, 'tester_fail', next.testRounds, ['coder', 'reviewer', 'tester'], config);
         if (!rollbackToPhase(state, 'coder')) {
           task.status = 'failed';
           await saveTask(flooDir, task);
@@ -382,16 +382,20 @@ async function checkCoderViolations(
     }
   }
 
-  // 3. 过滤 exit artifact:只保留本任务 scope 内的文件
-  const rawCount = exitArtifact.files_changed.length;
-  const taskFiles = exitArtifact.files_changed.filter(
-    file => findOutOfScope([file], task.scope).length === 0,
-  );
-  if (taskFiles.length !== rawCount) {
-    exitArtifact.files_changed = taskFiles;
-    const exitPath = join(flooDir, 'signals', `${task.id}-coder.exit`);
-    await writeFile(exitPath, JSON.stringify(exitArtifact, null, 2));
-    await log(flooDir, 'artifact-filtered', { task: task.id, raw: rawCount, filtered: taskFiles.length });
+  // 3. 过滤 exit artifact:只保留本任务 scope 内的文件。
+  //    empty scope = 任务无 scope 约束(不限制),全部保留;
+  //    否则 findOutOfScope 会把所有文件判为 out-of-scope,导致 ledger 全空。
+  if (task.scope.length > 0) {
+    const rawCount = exitArtifact.files_changed.length;
+    const taskFiles = exitArtifact.files_changed.filter(
+      file => findOutOfScope([file], task.scope).length === 0,
+    );
+    if (taskFiles.length !== rawCount) {
+      exitArtifact.files_changed = taskFiles;
+      const exitPath = join(flooDir, 'signals', `${task.id}-coder.exit`);
+      await writeFile(exitPath, JSON.stringify(exitArtifact, null, 2));
+      await log(flooDir, 'artifact-filtered', { task: task.id, raw: rawCount, filtered: taskFiles.length });
+    }
   }
   return 'pass';
 }
@@ -419,17 +423,24 @@ async function emitRetryPatch(
   reasonPrefix: 'reviewer_fail' | 'tester_fail',
   round: number,
   newPhases: ReadonlyArray<'coder' | 'reviewer' | 'tester'>,
+  config: FlooConfig,
 ): Promise<void> {
   const patchId = `${parentStepId}-${reasonPrefix}-${round}`;
-  // 按顺序生成 step,前一个是后一个的 depends_on
+  // 按顺序生成 step,前一个是后一个的 depends_on。
+  // runtime/model 按 capability 从 config.roles 显式取(codex review #4 修复:
+  // 不让 plan-patch 的 runtime/model fallback 拿到错的相邻 step 值,如把 reviewer
+  // 写成 coder 的 runtime)。
   const append_steps: PlanPatch['append_steps'] = [];
   let prevId: string | null = null;
   for (const phase of newPhases) {
     const id = `${phase}-retry-${reasonPrefix}-${round}`;
+    const role = task.role_overrides?.[phase] ?? config.roles[phase];
     append_steps.push({
       id,
       capability: phase,
       depends_on: [prevId ?? parentStepId],
+      runtime: role.runtime,
+      model: role.model,
     });
     prevId = id;
   }
