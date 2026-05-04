@@ -529,6 +529,20 @@ flowchart TB
 
 ## Step 6: Plan-Patch 机制
 
+> **当前进度(2026-05)**:✅ Done(数据机制完整 + 局部执行接通)。
+>
+> 已落地:
+> - `src/core/plan-patch.ts`:`PlanPatch` schema、`applyPatch`、`writePatch`、`readPatches`、`validatePatch`,append-only 校验完整(parent_step 存在 / id 不冲突 / depends_on 合法)
+> - `runStateMachine` 在 reviewer-fail / tester-fail retry 时自动调用 `emitRetryPatch`:落 patch 到 `.floo/batches/<id>/patches/`,readPlan + applyPatch + writePlan 让 plan.yaml 真正"演化"。UI 据此可视化执行图变化
+> - 损坏 patch 跳过 + console.warn(单点损坏不阻塞 batch),目录不存在返回空
+>
+> **范围说明 — 双轨道**:执行机制仍走 `RunState.rollbackToPhase`(复用已有 step),plan-patch 是可观测的"演化记录"。两份事实源(RunState 执行游标 + plan ledger)在 Step 6 阶段并存,Step 8 orchestrator 落地后再切换 RunState 为 patch-driven。
+>
+> **未做**(留给后续):
+> - `discuss → designer` 飞轮的 patch 化(`runDiscussDesignerWheel` 在 `executor/batch.ts` 仍用内置循环,逻辑深,翻译成 patch 触发器风险高)
+> - worker 主动输出 patch 文件(skills/reviewer.md / designer.md prompt 更新):当前 patch 由 executor 在 verdict handler 内自动生成,worker 不感知。Step 8 `--orchestrate` 模式才让 worker 自己决定 patch 形态
+> - 多 worker 并发 patch 串行化:当前 emitRetryPatch 是单 task 内部的,无并发;Step 7 UI 工作或 Step 8 orchestrator 引入并发后再处理
+
 ### 目标
 
 允许 worker step 在结束时输出 `.floo/batches/<id>/patches/<stepId>.yaml`,executor 应用补丁(只允许追加节点)。把当前 dispatcher 的 review-fail-loop / discuss-designer-loop 改写为 plan-patch 形态。
@@ -652,6 +666,6 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 | 4d. 复杂 path plan-driven(飞轮 + planner 拆分) | ✅ Done | `runBatchEntry` 改读 plan 拓扑(`planHasComplexCapability` / `planHasDiscussDesignerLoop` / `planHasPlanner` / `planHasPlannerExpansion`)决定 simple/wheel/planner/expansion 分支;不传 plan 时沿用老 startPhase 推断,行为零回归 |
 | 4e. PHASE_ORDER 从 feature.yaml 派生(消除硬编码常量) | ✅ Done | 新模块 `src/core/phase-order.ts` 启动期同步读 `templates/plans/feature.yaml` 派生;types.ts 改为 re-export 维持 import 兼容;读取/解析失败时 fallback 硬编码 + console.warn |
 | 5. Runtimes 进 config | ✅ Done | `floo.config.json#runtimes` 注册 CLI 命令模板;`GenericRuntimeAdapter` 配置驱动;`ClaudeAdapter` / `CodexAdapter` 退化为 GenericRuntimeAdapter 的 preset;commands/run.ts、cancel.ts 切到 `loadAdapters(config)`;`Runtime` 类型从封闭联合放开为 `'claude' \| 'codex' \| (string & {})` |
-| 6. Plan-patch | ⬜ Pending | |
+| 6. Plan-patch | ✅ Done | `src/core/plan-patch.ts` 提供 `PlanPatch` schema + `applyPatch` + IO;`emitRetryPatch` 在 reviewer/tester fail retry 时落 patch + 演化 plan.yaml(双轨道:RunState 仍走 rollbackToPhase 执行,plan 是 ledger)。discuss-designer 飞轮、worker-output-patch、并发串行化留给后续 |
 | 7. UI 改造 | ⬜ Pending | |
 | 8. --orchestrate | ⬜ Pending | opt-in 高级模式 |

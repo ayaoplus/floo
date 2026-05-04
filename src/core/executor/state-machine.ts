@@ -25,6 +25,8 @@ import {
 import { readExitArtifact } from '../adapters/base.js';
 import { findOutOfScope, ensureFlooDir } from '../scope.js';
 import { notify } from '../notifications.js';
+import { readPlan, writePlan } from '../plan.js';
+import { applyPatch, writePatch, type PlanPatch } from '../plan-patch.js';
 
 import { log, saveTask } from './io.js';
 import { collectArtifact, cleanStaleArtifact } from './artifacts.js';
@@ -172,6 +174,9 @@ async function runStateMachine(
       if (next.action === 'fail') return task;
       if (next.action === 'retry-coder') {
         state.reviewRounds = next.reviewRounds;
+        // Step 6: retry 时生成 plan-patch 落盘 + 更新 plan.yaml(plan 演化 ledger,
+        // 双轨道——执行仍走 RunState.rollback)
+        await emitRetryPatch(flooDir, task, step.id, 'reviewer_fail', next.reviewRounds, ['coder', 'reviewer']);
         if (!rollbackToPhase(state, 'coder')) {
           // coder 不在 step 列表里(--from reviewer),其实已被 handleReviewerVerdict 标 fail 走前面
           // 这里只是兜底:若意外进入,直接退出避免死循环
@@ -189,6 +194,8 @@ async function runStateMachine(
       if (next.action === 'retry-coder') {
         state.testRounds = next.testRounds;
         state.reviewRounds = 0;  // 重置 review 轮数,新一轮 coder→reviewer→tester
+        // Step 6: tester fail 重跑 coder→reviewer→tester,patch 含三个新 step
+        await emitRetryPatch(flooDir, task, step.id, 'tester_fail', next.testRounds, ['coder', 'reviewer', 'tester']);
         if (!rollbackToPhase(state, 'coder')) {
           task.status = 'failed';
           await saveTask(flooDir, task);
@@ -387,4 +394,77 @@ async function checkCoderViolations(
     await log(flooDir, 'artifact-filtered', { task: task.id, raw: rawCount, filtered: taskFiles.length });
   }
   return 'pass';
+}
+
+// ============================================================
+// Plan-patch 生成 (Step 6 - B)
+// ============================================================
+
+/**
+ * 在 reviewer/tester verdict 触发 retry 时,落一份 plan-patch + 更新 plan.yaml。
+ *
+ * 设计为"只增不减"的 ledger:
+ *   - patch 写到 .floo/batches/<batchId>/patches/<patch_id>.yaml
+ *   - readPlan + applyPatch + writePlan 把新 step 接到 plan.yaml 末尾
+ *   - 失败不 throw 不阻塞执行循环——执行靠 RunState.rollback,patch 是可观测附加
+ *
+ * 双轨道说明:RunState 仍然 rollback 到已有 coder step 复用,patch 在 plan 上
+ * append 形态新 step(coder-retry-N / reviewer-retry-N / ...)。Step 8 切换
+ * 执行机制后,RunState 也按 plan 走,一份事实源。
+ */
+async function emitRetryPatch(
+  flooDir: string,
+  task: Task,
+  parentStepId: string,
+  reasonPrefix: 'reviewer_fail' | 'tester_fail',
+  round: number,
+  newPhases: ReadonlyArray<'coder' | 'reviewer' | 'tester'>,
+): Promise<void> {
+  const patchId = `${parentStepId}-${reasonPrefix}-${round}`;
+  // 按顺序生成 step,前一个是后一个的 depends_on
+  const append_steps: PlanPatch['append_steps'] = [];
+  let prevId: string | null = null;
+  for (const phase of newPhases) {
+    const id = `${phase}-retry-${reasonPrefix}-${round}`;
+    append_steps.push({
+      id,
+      capability: phase,
+      depends_on: [prevId ?? parentStepId],
+    });
+    prevId = id;
+  }
+
+  const patch: PlanPatch = {
+    schema_version: 1,
+    patch_id: patchId,
+    generated_at: new Date().toISOString(),
+    generated_by: 'executor:verdict-retry',
+    parent_step: parentStepId,
+    reason: `${reasonPrefix}_round_${round}`,
+    kind: 'append-steps',
+    append_steps,
+  };
+
+  try {
+    await writePatch(flooDir, task.batch_id, patch);
+    // plan.yaml 演化:读 → apply → 写。如果 plan 不存在(老 dispatcher 路径)直接跳过
+    const plan = await readPlan(flooDir, task.batch_id);
+    if (plan) {
+      const result = applyPatch(plan, patch);
+      await writePlan(flooDir, result.plan);
+      await log(flooDir, 'plan-patch-applied', {
+        task: task.id,
+        patch: patch.patch_id,
+        appended: result.appended.map(s => s.id),
+      });
+    } else {
+      await log(flooDir, 'plan-patch-skipped-no-plan', { task: task.id, patch: patch.patch_id });
+    }
+  } catch (err) {
+    await log(flooDir, 'plan-patch-emit-failed', {
+      task: task.id,
+      parent_step: parentStepId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
