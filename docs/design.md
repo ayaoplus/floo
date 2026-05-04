@@ -49,11 +49,26 @@ inputs:                      # 这个 capability 期望读到的上游产物
 
 `write_policy` 由 executor **在 step 完成后**校验(事后检测,不是事前拦截):
 
-- `scope`:step 完成后 executor 比对 `files_changed` 与声明的 file scope。越界文件 → step 标记为 `failed-out-of-scope`,越界变更 quarantine(写入 `.floo/.../quarantine/<stepId>.diff`)而不直接进 commit。
-- `artifacts_only`:只允许写本任务目录下的 markdown 产物(context.md / design.md / plan.md 等)。检测到 git diff 中含其他文件 → fail。
-- `readonly`:step 完成后检测 git tree 是否变更。任何变更 → fail + quarantine。
+- `scope`:step 完成后,executor 比对从 `head_before` → `head_after` 之间的 commits + working tree diff,与声明的 file scope 求差集。越界 → step 标记为 `failed-out-of-scope`。
+- `artifacts_only`:只允许写本任务目录下的 markdown 产物(context.md / design.md / plan.md 等)。检测到 commits 或 git tree 中含其他文件 → fail。
+- `readonly`:step 完成后检测 `head_before === head_after` 且 working tree 干净。任何变更 → fail。
 
-> **当前实现说明**:`adapters/base.ts` 里的 git wrapper 仅做并发 git 写串行化(mkdir 锁),**没有**文件系统沙箱能力。"事前拦截"会留到未来如果真的需要文件系统隔离时再做(候选方案:bubblewrap / Linux namespace / macOS sandbox-exec)。在那之前,`write_policy` 是事后纪律,不是事前防护——自律的 agent 会守约,作恶的 agent 能绕过,但你能在 ledger 里看到证据。
+#### 当前提交模型与检测时机
+
+**当前**:`coder` 在 prompt 里被要求**自己原子提交**(见 `skills/coder.md`)。也就是越界变更**已经进 HEAD** 才会被 executor 看到。所以 `write_policy: scope` 的真实语义是:
+
+- **事后纪律**:executor 检测到越界 → step `failed-out-of-scope` + 诊断报告(列出违规 commit SHA、文件、建议的 `git revert <sha>` 或 `git reset --soft head_before` 命令)
+- **不自动反悔**:executor **不会**自动 revert / cherry-pick 干净化 HEAD。这是用户/上层 plan-patch 决策(失败的 step 是否触发清理 step)
+- **不承诺 quarantine**:既然变更已经在 HEAD,就没有"暂存区"可以扣留。`.floo/.../diagnostics/<stepId>.md` 只记录证据,不是 quarantine 容器
+
+#### 未来可选演进:统一提交模型
+
+如果未来要做真正的 staging 和 quarantine,需要先改提交模型:
+
+- **Option A (Runner 统一提交)**:`skills/coder.md` 改为不自提交,只产出 working tree 变更;runner 在 step 末尾、policy 校验通过后再 commit。这样 executor 拿到的是 dirty tree,可以校验通过后再 commit、失败时 stash + drop。
+- **Option B (沙箱)**:bubblewrap / Linux namespace / macOS sandbox-exec 隔离文件系统,真正做"事前拦截"。
+
+**Option A 是低成本路径,Option B 是高成本高保障路径**。两者都不在当前重构范围,何时做取决于是否真的撞上"agent 越界改了文件库还回滚不掉"的事故。在那之前,`write_policy` 就是事后纪律 + 证据链——自律的 agent 守约,作恶的 agent 你能在 ledger 里抓到。
 
 **capability 注册中心 = `ls skills/`**。新增一个 capability = 加一份 `skills/<name>.md`。不需要再维护一份 `capabilities.yaml`(避免双事实源)。
 
@@ -70,30 +85,54 @@ inputs:                      # 这个 capability 期望读到的上游产物
 
 ### 2. Runtime Config (runtime 注册中心)
 
-`floo.config.json` 增加 `runtimes` 段,登记本机可用的 agent CLI:
+`floo.config.json` 增加 `runtimes` 段,登记本机可用的 agent CLI。**关键设计**:不同 CLI 接收 prompt 的方式不同(Claude 用 `-p '<text>'` 选项,Codex 用位置参数),通用 adapter 必须知道每个 runtime 的 prompt 传入契约。两种声明方式:
 
-```json
+```jsonc
 {
   "runtimes": {
+    // 方式 A: 模板占位符 (推荐) — args 数组里直接放 {prompt} / {model} 占位
     "claude": {
       "command": "claude",
-      "args": ["--dangerously-skip-permissions", "--print"],
+      "args": ["--model", "{model}", "--dangerously-skip-permissions", "-p", "{prompt}"],
       "models": ["sonnet", "opus", "haiku"],
       "default_model": "sonnet"
     },
     "codex": {
       "command": "codex",
-      "args": ["exec", "--model", "{model}"],
+      "args": ["exec", "--model", "{model}", "--dangerously-bypass-approvals-and-sandbox", "{prompt}"],
       "models": ["gpt-5.2", "gpt-5.3-codex"],
       "default_model": "gpt-5.2"
+    },
+
+    // 方式 B: 显式 prompt_mode — 用于 stdin/file 传入的 CLI
+    "gemini": {
+      "command": "gemini",
+      "args": ["-p"],
+      "prompt_mode": "stdin",        // arg | stdin | file
+      "models": ["gemini-pro"],
+      "default_model": "gemini-pro"
+    },
+    "some-cli-with-file-prompt": {
+      "command": "foo",
+      "args": ["--prompt-file", "{prompt_file}"],
+      "prompt_mode": "file",          // 把 prompt 写到临时文件,{prompt_file} 替换为路径
+      "default_model": "default"
     }
   }
 }
 ```
 
-新接 Gemini / OpenClaw / opencode = 加一段配置。Adapter 层退化为"按配置启动 tmux,捕获 stdout/stderr"的通用执行器,不再为每种 runtime 单独写 TypeScript 类。
+约定:
 
-> **过渡期备注**:当前 `src/core/adapters/{claude,codex}.ts` 仍是硬编码类。重构会保留它们作为 fallback,直到通用 runtime adapter 验证稳定。
+- `{prompt}` 占位符 = adapter 用 shell-quoted 字符串替换(对应 `prompt_mode: arg`,默认值)
+- `{model}` 占位符 = 用 step 的 `model` 字段替换
+- `{prompt_file}` 占位符 = adapter 把 prompt 写入临时文件,替换为文件路径
+- `prompt_mode: stdin` = 不在 args 里出现 prompt,adapter 启动后通过 stdin 喂入
+- 任何 args 元素中的 `{...}` 替换失败(占位符未声明) → fail-fast,启动前报错
+
+新接 Gemini / OpenClaw / opencode = 加一段配置。Adapter 层退化为"按配置启动 tmux + 按 prompt_mode 传入 prompt + 捕获 stdout/stderr"的通用执行器,不再为每种 runtime 单独写 TypeScript 类。
+
+> **过渡期备注**:当前 `src/core/adapters/{claude,codex}.ts` 仍是硬编码类(参考 `adapters/claude.ts:20` 与 `adapters/codex.ts:20` 的 buildAgentCommand)。重构会保留它们作为 fallback,直到通用 runtime adapter 验证稳定。
 
 ### 3. Plan Templates (静态默认流程)
 

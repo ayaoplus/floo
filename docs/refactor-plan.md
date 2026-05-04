@@ -63,56 +63,67 @@
 
 ---
 
-## Step 2: 把 PHASE_ORDER 的事实源从代码迁到 yaml(行为不变)
+## Step 2: 引入 templates/plans/ 与 loadTemplate()(纯文档/loader,不影响行为)
 
 ### 目标
 
-`PHASE_ORDER` 常量**仍然存在**(为兼容现有 export 和测试),但它的初始值不再写死,而是在模块加载时从 `templates/plans/feature.yaml` 派生:
+仅落地两件事:
 
-```ts
-// 旧
-export const PHASE_ORDER: Phase[] = ['discuss', 'designer', ..., 'tester'];
+1. 建立 `templates/plans/` 目录,放入 `feature.yaml` 作为**当前固定 6 阶段管线的等价文档**(只是文档,不被消费)
+2. 新增 `src/core/plan.ts` 中的 `loadTemplate(name)` 函数,纯 IO + 解析,**不被 dispatcher 调用**
 
-// 新
-export const PHASE_ORDER: Phase[] = loadTemplate('feature.yaml').steps.map(s => s.capability) as Phase[];
-```
+**这一步明确不承诺任何行为变化**。`PHASE_ORDER` 常量保持当前硬编码值不变,dispatcher 一行不动。
 
-dispatcher 内部状态机不变,仍消费 `PHASE_ORDER`。**但 PHASE_ORDER 的"权威来源"已经搬到 yaml**——重启进程时,用户对 `feature.yaml` 的编辑会生效。
+### 为什么不在这步把模板"接上"
 
-这是一个保守的"事实源迁移",不是"换一套执行模型"。后者留到 Step 4。
+事实核对:`src/core/dispatcher.ts:1438-1499` 显示当前 `createAndRun` 有大量**绕过 `PHASE_ORDER` 的硬编码逻辑**:
+
+- `:1438` `if (startIdx >= coderIdx)` → coder/reviewer/tester 短路,完全不按 PHASE_ORDER 顺序推进
+- `:1499` `if (startPhase === 'discuss' || startPhase === 'designer')` → 进入硬编码的 discuss/designer 飞轮,飞轮内部 phase 顺序也是写死的
+- 飞轮之后才进入 planner → coder → reviewer → tester 的常规推进
+
+这意味着**仅把 `PHASE_ORDER` 来源改成 yaml,大部分行为不会随 yaml 变化**。用户编辑 `feature.yaml` 把 designer 删掉,飞轮代码仍然会跑 designer——给用户一个"编辑模板能改变行为"的承诺,实际是半真半假。
+
+同样,`PHASE_ORDER` 是**模块级 export**,只在进程启动时确定一次,无法 per-run 切换。tiny/quick/feature 三个 mode 不能通过"加载不同 yaml 改 PHASE_ORDER"实现——同一进程内多个并发任务会互相污染。
+
+**结论**:真正的模板驱动行为切换,要等 Step 4 的 executor 落地,把 dispatcher 里那些硬编码分支一起换成 plan.yaml 拓扑驱动。Step 2 不要假装能做到。
 
 ### 输入
 
-- Step 1 完成(plan.yaml 落盘的数据模型已稳定)
+- Step 1 完成(plan.yaml 落盘数据模型稳定)
 
 ### 输出
 
-- `templates/plans/feature.yaml`:与当前 6 阶段语义等价
-- `templates/plans/tiny.yaml`:仅 coder
-- `templates/plans/quick.yaml`:coder → reviewer
-- `src/core/plan.ts` 加 `loadTemplate(name)`(同步 IO,模块加载时即用)
-- router 改成"先选模板,再从模板的 steps 里取 startPhase",但内部仍走 PHASE_ORDER 索引
+- `templates/plans/feature.yaml`:与当前 6 阶段语义等价的**文档**(注释里说明"当前未被 dispatcher 消费,Step 4 之后生效")
+- `src/core/plan.ts` 加 `loadTemplate(name): PlanTemplate`:同步读 yaml + schema 校验
+- 单测:`loadTemplate('feature')` 返回结构化对象,字段齐全
+- Step 1 落盘的 plan.yaml 在 metadata 段加一行 `template: feature`,标注"这次执行的 plan 来源于哪份模板"(纯标记,无运行时影响)
 
 ### 不做
 
-- 不删 `PHASE_ORDER` export(测试和 dispatcher 都依赖)
-- dispatcher 不读 plan.yaml 执行(Step 4 才换)
-- 不加 frontmatter(Step 3)
-- 不动 runtime adapter
+- ❌ 不改 `PHASE_ORDER` 来源,仍是硬编码常量
+- ❌ 不加 `tiny.yaml` / `quick.yaml`(没有消费方,先不写,Step 4 用到时再加)
+- ❌ 不让 router 选模板
+- ❌ 不让 dispatcher 调用 `loadTemplate()`
+- ❌ 不引入 `--mode` 标志
+- ❌ 不加 frontmatter(Step 3)
+- ❌ 不动 runtime adapter
 
 ### 验收
 
-- 用户编辑 `templates/plans/feature.yaml` 调整 step 顺序,**重启** Floo 后,`PHASE_ORDER` 反映新顺序,dispatcher 走新顺序
-- `floo run --mode tiny|quick|feature` 三种模板都能跑通(实质上是改变启动时加载哪份 yaml,然后让 PHASE_ORDER 对应不同序列;`tiny` / `quick` 路径下 dispatcher 在跑到不存在的 phase 时跳过——具体跳过逻辑在 Step 1 的 plan.yaml 落盘里就要预演过)
-- 现有测试 100% 通过(因为 `PHASE_ORDER` export 和值都保持等价)
+- `loadTemplate('feature')` 单测通过,返回结构与 plan.yaml schema 一致
+- `feature.yaml` 内容与当前实际 6 阶段行为对齐(人工审查 + 一份 mapping 注释)
+- `npm test` 100% 通过(本步对运行时零影响)
+- 用户编辑 `templates/plans/feature.yaml` **不会改变 Floo 行为**——这是预期的,文档要明说
 
 ### 风险
 
-中。三个具体风险:
+低。纯增量,无消费方。
 
-1. **模板加载失败的 fail-fast**:模块顶层加载 yaml 失败要打印清晰错误并 exit 1,不能让 PHASE_ORDER 变成 undefined。
-2. **三个 mode 的语义对齐**:`tiny` 没有 designer 等 phase,但 dispatcher 状态机仍按 PHASE_ORDER 推进——需要在 dispatcher 入口前根据 mode 截断 startIdx/endIdx,而不是动 PHASE_ORDER 本身。
-3. **测试稳定性**:`test/core.test.ts` 第 57 行 `assert(PHASE_ORDER.length === 6)` 是基于 `feature.yaml` 模板的硬断言。如果用户改了 yaml 测试就挂——这个测试需要改成"PHASE_ORDER 反映 feature.yaml"而不是"长度恒等于 6"。这是 Step 2 唯一不可避免的测试改动。
+### 与 Codex review 的对应
+
+- Codex Major #2:✅ 不再承诺 PHASE_ORDER 派生 + 行为变化
+- Codex Major #3:✅ 不再承诺 tiny/quick mode 跑通,这些模板及其行为推迟到 Step 4
 
 ---
 
@@ -164,20 +175,39 @@ dispatcher 内部状态机不变,仍消费 `PHASE_ORDER`。**但 PHASE_ORDER 的
 
 ### 目标
 
-新写一个 `src/core/executor.ts`,以 plan.yaml 为唯一输入驱动调度。`dispatcher.ts` 要么删除,要么退化为 executor 的薄包装。frontmatter 中的 `write_policy` / `outputs` 由 executor 强制执行。
+新写一个 `src/core/executor.ts`,以 plan.yaml 为唯一输入驱动调度。`dispatcher.ts` 退化为 compatibility shim,内部委托 executor。frontmatter 中的 `write_policy` / `outputs` 由 executor 在 step 完成后强制校验(事后检测,见 design.md 中 write_policy 章节)。
+
+**这一步首次承诺"模板驱动行为变化"**。具体涵盖:
+
+1. dispatcher 中 `:1438` 的 coder 短路、`:1499` 的 discuss/designer 飞轮等硬编码分支,**全部翻译成 plan.yaml 节点 + depends_on**。短路 = router 生成更短的 plan;飞轮 = 通过 plan-patch (Step 6) 表达,但 Step 4 阶段先用 executor 内置的"feature.yaml 等价模式"承接(见下方"飞轮的过渡处理")
+2. `tiny.yaml` / `quick.yaml` 模板加入 `templates/plans/`,并由 router 根据任务关键词或 `--mode` 选用
+3. `floo run --mode tiny|quick|feature` 各模板都能跑通,**因为 executor 现在直接消费 plan.yaml**,而不是通过模块级 `PHASE_ORDER` 间接控制
 
 ### 输入
 
 - Step 1-3 完成
-- `templates/plans/feature.yaml`
+- Step 2 落地的 `loadTemplate()` 在 Step 4 第一次被实际调用
 - 各 skill 的 frontmatter
 
 ### 输出
 
-- `src/core/executor.ts`:DAG 拓扑调度循环
+- `src/core/executor.ts`:DAG 拓扑调度循环 + `write_policy` 事后校验
+- `src/core/router.ts`:改成"任务 → plan template name"的选择器
+- `templates/plans/tiny.yaml`:仅 coder
+- `templates/plans/quick.yaml`:coder → reviewer
 - `src/core/scope.ts`:沿用,接口微调以匹配 plan 节点
 - `src/core/dispatcher.ts`:**保留为 compatibility shim**(不删),内部委托 executor
 - 现有测试**不改**继续通过
+
+### 飞轮的过渡处理
+
+`discuss → designer` 飞轮在当前实现里是循环结构(designer 输出 blocker → 回 discuss round 2)。Step 4 不引入 plan-patch,因此飞轮在这一步用 executor 的**内置循环模式**承接:
+
+- `feature.yaml` 中 discuss step 的 frontmatter 加 `loop_with: designer`
+- executor 识别到这个标记,在 designer 完成且产出 design-questions 含 blocker 时,自动重跑 discuss + designer,直到 `loop_limits.max_discuss_rounds`
+- review/test 失败回 coder 同理处理
+
+这是过渡期的"硬编码循环模式"。Step 6 plan-patch 落地后,这种模式可以被 worker 输出 patch 取代,但 Step 4 不强求。
 
 ### 测试迁移策略 (源码 shim 而不是 test helper)
 
@@ -187,7 +217,7 @@ dispatcher 内部状态机不变,仍消费 `PHASE_ORDER`。**但 PHASE_ORDER 的
 
 加 `test/helpers/dispatcher-shim.ts` **救不了**这些直接 import。正确做法是**在源码层保留兼容 export**:
 
-1. **`PHASE_ORDER` 保留**:Step 2 已经把它的事实源迁到 yaml,Step 4 保持这个迁移结果不变。
+1. **`PHASE_ORDER` 保留为硬编码常量**:Step 2 没有改它的来源,Step 4 也不改。它在新架构下只是向后兼容 export(测试和潜在外部消费者),executor 内部不读它,只读 plan.yaml。如果未来想让它从 `feature.yaml` 派生,作为独立清理任务,不在重构主线里。
 2. **`runTask` 保留为 thin wrapper**:
    ```ts
    export async function runTask(task, startPhase, opts) {
@@ -376,9 +406,9 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 | Step | 状态 | 备注 |
 |------|------|------|
 | 1. plan.yaml 落盘(只读镜像) | ⬜ Pending | |
-| 2. PHASE_ORDER 事实源迁 yaml(行为不变) | ⬜ Pending | |
+| 2. templates/plans/ + loadTemplate(纯 loader,零行为变化) | ⬜ Pending | |
 | 3. Skill frontmatter | ⬜ Pending | Step 4 前置 |
-| 4. Executor 内化(dispatcher 退化为 shim) | ⬜ Pending | **核心步骤,需独立分支** |
+| 4. Executor 内化 + 模板驱动行为切换(dispatcher 退化为 shim) | ⬜ Pending | **核心步骤,需独立分支;首次承诺模板驱动行为变化** |
 | 5. Runtimes 进 config | ⬜ Pending | |
 | 6. Plan-patch | ⬜ Pending | |
 | 7. UI 改造 | ⬜ Pending | |
