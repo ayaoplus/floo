@@ -184,7 +184,7 @@ export async function runBatch(
 export async function createAndRun(
   description: string,
   startPhase: Phase,
-  opts: DispatcherOptions & { scope?: string[] },
+  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase },
 ): Promise<{ batch: Batch; tasks: Task[] }> {
   const { projectRoot } = opts;
   const config = opts.config ?? DEFAULT_CONFIG;
@@ -269,7 +269,7 @@ export async function createAndRun(
 
 async function runBatchEntry(
   startPhase: Phase,
-  opts: DispatcherOptions & { scope?: string[] },
+  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase },
   batch: Batch,
   mainTask: Task,
   batchId: string,
@@ -313,7 +313,7 @@ async function runBatchEntry(
 
 async function runSimplePath(
   startPhase: Phase,
-  opts: DispatcherOptions & { scope?: string[] },
+  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase },
   batch: Batch,
   mainTask: Task,
   batchId: string,
@@ -321,8 +321,9 @@ async function runSimplePath(
   flooDir: string,
   projectRoot: string,
 ): Promise<{ batch: Batch; tasks: Task[] }> {
-  // reviewer/tester 是单 phase;coder 跑完整 coder→reviewer→tester
-  const endPhase = startPhase === 'coder' ? undefined : startPhase;
+  // 显式 opts.endPhase 优先(--mode tiny/quick 走这条);
+  // 否则:reviewer/tester 单 phase,coder 跑完整 coder→reviewer→tester
+  const endPhase = opts.endPhase ?? (startPhase === 'coder' ? undefined : startPhase);
   const result = await runTask(mainTask, startPhase, opts, endPhase);
   batch.status = result.status === 'completed' ? 'completed'
     : result.status === 'cancelled' ? 'cancelled'

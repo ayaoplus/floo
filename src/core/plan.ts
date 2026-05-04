@@ -361,6 +361,29 @@ export async function loadTemplate(name: string, baseDir?: string): Promise<Plan
   return validateTemplate(parsed, name);
 }
 
+/**
+ * 把模板转换成 (startPhase, endPhase) 元组,供 createAndRun 消费。
+ *
+ * 规则:
+ *   - startPhase = 第一个 step 的 capability(必须存在,validateTemplate 已保证)
+ *   - endPhase   = 最后一个 step 的 capability;若等于 PHASE_ORDER 的最后一阶段则返回 undefined
+ *                  (sentinel 值表示"跑到流程结尾")
+ *
+ * 这是 Step 4b 阶段的简化映射:模板的拓扑结构暂时只用首尾 phase 表示,
+ * 完整的 step DAG 留给 PlanState 驱动后(Step 4c+)消费。
+ */
+export function templateToPhases(template: PlanTemplate): { startPhase: Phase; endPhase?: Phase } {
+  const firstStep = template.steps[0];
+  const lastStep = template.steps[template.steps.length - 1];
+  const startPhase = firstStep.capability;
+  const lastCap = lastStep.capability;
+  const isFullPipeline = lastCap === PHASE_ORDER[PHASE_ORDER.length - 1];
+  return {
+    startPhase,
+    ...(isFullPipeline ? {} : { endPhase: lastCap }),
+  };
+}
+
 /** schema 校验:返回结构化对象,失败抛 Error 含定位信息 */
 export function validateTemplate(parsed: unknown, name: string): PlanTemplate {
   if (!parsed || typeof parsed !== 'object') {

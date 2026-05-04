@@ -80,6 +80,7 @@ export {
   loadTemplate,
   validateTemplate,
   planTemplatePath,
+  templateToPhases,
   type PlanYaml,
   type PlanStep,
   type PlanStepStatus,

@@ -1,0 +1,18 @@
+# Tiny plan template — 一行 typo / 文案修复
+#
+# 状态(2026-05-04):本模板由 Step 4b 引入。当前消费方式:
+#   commands/run.ts 解析 --mode tiny → templateToPhases('tiny') → startPhase=coder, endPhase=coder
+# 即 dispatcher 只跑 coder 一个 phase,不派 reviewer / tester / planner / designer / discuss。
+#
+# 适用场景:用户已经精确定位到要改什么(scope 给定 + 描述明确),不需要任何 review 流程。
+# 风险:质量保证全靠 agent 自律,适合 typo / 文案 / 简单格式修复。
+
+schema_version: 1
+name: tiny
+description: 仅 coder 一步;适合一行 typo / 文案 / 注释修复
+
+steps:
+  - id: implement
+    capability: coder
+    depends_on: []
+    scope: task

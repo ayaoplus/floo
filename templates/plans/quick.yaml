@@ -1,0 +1,30 @@
+# Quick plan template — coder + 跨 runtime reviewer
+#
+# 状态(2026-05-04):本模板由 Step 4b 引入。当前消费方式:
+#   commands/run.ts 解析 --mode quick → templateToPhases('quick') → startPhase=coder, endPhase=reviewer
+# 即跑 coder → reviewer 两步,跳过 tester。
+#
+# 设计意图:作为最朴素的"跨 agent 协同"基线
+#   - coder 用 default_runtime (skills/coder.md frontmatter:claude/sonnet)
+#   - reviewer 用 default_runtime (skills/reviewer.md frontmatter:codex/codex-mini)
+# 这是 Floo 相对 Ralph 的核心差异化(同一个任务两个 runtime 互查),
+# 适合中等复杂度修复:既不像 tiny 完全无防护,也不需要 tester 跑完整测试。
+#
+# 注意:本模板里 runtime 字段都缺省(没强制写 claude/codex),
+# executor (Step 4b 之后) 会从 skills/*.md frontmatter 读 default_runtime。
+# 如果用户想强制 reviewer 用 claude(同 runtime 互查)而非 codex,
+# 可以在 plan.yaml 里 step 上写 runtime: claude 覆盖。
+
+schema_version: 1
+name: quick
+description: coder + reviewer(跨 runtime 评审);适合中等修复或紧急 hotfix
+
+steps:
+  - id: implement
+    capability: coder
+    depends_on: []
+    scope: task
+
+  - id: review
+    capability: reviewer
+    depends_on: [implement]

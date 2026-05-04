@@ -408,8 +408,9 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 | 1. plan.yaml 落盘(只读镜像) | ✅ Done | `src/core/plan.ts`;commit `bddc89e` |
 | 2. templates/plans/ + loadTemplate(纯 loader,零行为变化) | ✅ Done | `templates/plans/feature.yaml` + `loadTemplate()`;commit `9fc0730` |
 | 3. Skill frontmatter | ✅ Done | 6 个 skill 加 frontmatter,`loadSkillWithMetadata` API 上线,老 `loadSkill` 向后兼容;commit `2d450ad` |
-| 4a. Executor 模块上线(plan-driven 入口 facade) | ✅ Done | `src/core/executor.ts` 提供 `runPlan` / `runPlanFromDisk`,内部仍委托 `dispatcher.createAndRun`。API 契约固化,外部消费者可从 plan.yaml 启动 Floo;dispatcher 一行不动,294 断言全过 |
-| 4b. dispatcher 状态机搬入 executor + tiny/quick 模板 + router 改 | ⬜ Pending | **真正的"模板驱动行为变化"在这一步**。需独立分支,涉及搬迁 `runTask` / `runBatch` / 飞轮等。当前 PHASE_ORDER 仍硬编码 |
+| 4a. Executor 模块上线(plan-driven 入口 facade) | ✅ Done | `src/core/executor.ts` 提供 `runPlan` / `runPlanFromDisk`;commit `0188a47` |
+| 4b. dispatcher 退化 shim + 子模块化 + tiny/quick 模板 + `--mode` | ✅ Done | dispatcher.ts 1661 → 18 行 thin shim;状态机/飞轮/planner 拆分搬到 `executor/state-machine.ts` + `executor/batch.ts`;子模块拆分:io/artifacts/prompt/execute-step/verdict/planner/summary。`tiny.yaml` / `quick.yaml` + `templateToPhases()` + `floo run --mode tiny\|quick\|feature`;commits `bd15590`、`8bc56fa`、本次 |
+| 4c. PlanState-driven 状态机(用户编辑 yaml 真改变行为) | ⬜ Pending | runTask 内部从 `(task, startPhase)` 改为消费 PlanState;PHASE_ORDER 从 yaml 派生(目前仍硬编码常量) |
 | 5. Runtimes 进 config | ⬜ Pending | |
 | 6. Plan-patch | ⬜ Pending | |
 | 7. UI 改造 | ⬜ Pending | |

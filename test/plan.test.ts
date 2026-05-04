@@ -16,6 +16,7 @@ import {
   loadTemplate,
   validateTemplate,
   planTemplatePath,
+  templateToPhases,
   DEFAULT_CONFIG,
 } from '../src/core/index.js';
 import type { Batch, Task, Phase } from '../src/core/index.js';
@@ -338,6 +339,42 @@ expectThrow(
     'x',
   );
   assert(tpl.steps[0].id === 'a', '合法模板正常返回');
+}
+
+// ============================================================
+// 8b. tiny / quick 内置模板 + templateToPhases (Step 4b)
+// ============================================================
+
+console.log('\n=== 8b. tiny / quick 内置模板 ===');
+
+{
+  const tiny = await loadTemplate('tiny');
+  assert(tiny.name === 'tiny', 'tiny.yaml name');
+  assert(tiny.steps.length === 1, 'tiny 仅 1 步');
+  assert(tiny.steps[0].capability === 'coder', 'tiny step 0 = coder');
+  const tinyPhases = templateToPhases(tiny);
+  assert(tinyPhases.startPhase === 'coder', 'tiny startPhase = coder');
+  assert(tinyPhases.endPhase === 'coder', 'tiny endPhase = coder(单 phase)');
+}
+
+{
+  const quick = await loadTemplate('quick');
+  assert(quick.name === 'quick', 'quick.yaml name');
+  assert(quick.steps.length === 2, 'quick 含 2 步');
+  assert(quick.steps[0].capability === 'coder', 'quick step 0 = coder');
+  assert(quick.steps[1].capability === 'reviewer', 'quick step 1 = reviewer');
+  const quickPhases = templateToPhases(quick);
+  assert(quickPhases.startPhase === 'coder', 'quick startPhase = coder');
+  assert(quickPhases.endPhase === 'reviewer', 'quick endPhase = reviewer');
+}
+
+console.log('\n=== 8c. templateToPhases: feature 完整流程 endPhase=undefined ===');
+
+{
+  const feature = await loadTemplate('feature');
+  const phases = templateToPhases(feature);
+  assert(phases.startPhase === 'discuss', 'feature startPhase = discuss');
+  assert(phases.endPhase === undefined, 'feature endPhase=undefined(走到流程结尾)');
 }
 
 // ============================================================

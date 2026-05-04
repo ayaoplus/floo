@@ -12,6 +12,8 @@ import { join } from 'node:path';
 import {
   createAndRun,
   routeTask,
+  loadTemplate,
+  templateToPhases,
   ClaudeAdapter,
   CodexAdapter,
   DEFAULT_CONFIG,
@@ -25,9 +27,10 @@ export const runCommand = new Command('run')
   .description('创建并执行任务')
   .argument('<description>', '任务描述')
   .option('--from <phase>', '指定起始阶段 (discuss/designer/planner/coder/reviewer/tester)')
+  .option('--mode <name>', '使用 plan 模板 (tiny/quick/feature),覆盖 --from 与自动路由')
   .option('--scope <files...>', '指定文件 scope')
   .option('--detach', '后台运行，立即返回')
-  .action(async (description: string, options: { from?: string; scope?: string[]; detach?: boolean }) => {
+  .action(async (description: string, options: { from?: string; mode?: string; scope?: string[]; detach?: boolean }) => {
     const cwd = process.cwd();
 
     // Milestone 1 强约束：working tree 必须干净（排除 floo 自身文件）
@@ -78,14 +81,32 @@ export const runCommand = new Command('run')
       process.exit(0);
     }
 
-    // 路由：决定从哪个 phase 开始
-    const startPhase = routeTask(description, {
-      from: options.from as Phase | undefined,
-      scope: options.scope,
-    });
-
-    console.log(`任务: ${description}`);
-    console.log(`起始阶段: ${startPhase}`);
+    // 决定 startPhase + 可选 endPhase:
+    //   --mode 优先(从模板读 startPhase / endPhase)
+    //   否则走 routeTask(--from 或自动判断)
+    let startPhase: Phase;
+    let endPhase: Phase | undefined;
+    if (options.mode) {
+      try {
+        const tpl = await loadTemplate(options.mode);
+        const phases = templateToPhases(tpl);
+        startPhase = phases.startPhase;
+        endPhase = phases.endPhase;
+        console.log(`任务: ${description}`);
+        console.log(`模板: ${options.mode} (${tpl.description ?? ''})`);
+        console.log(`阶段范围: ${startPhase}${endPhase ? ` → ${endPhase}` : ' → 全流程'}`);
+      } catch (err) {
+        console.error(`加载模板失败: ${err instanceof Error ? err.message : err}`);
+        process.exit(1);
+      }
+    } else {
+      startPhase = routeTask(description, {
+        from: options.from as Phase | undefined,
+        scope: options.scope,
+      });
+      console.log(`任务: ${description}`);
+      console.log(`起始阶段: ${startPhase}`);
+    }
     if (options.scope) {
       console.log(`Scope: ${options.scope.join(', ')}`);
     }
@@ -126,6 +147,7 @@ export const runCommand = new Command('run')
         adapters,
         scope: options.scope,
         signal: ac.signal,
+        endPhase,
       });
 
       const allCompleted = tasks.every(t => t.status === 'completed');
