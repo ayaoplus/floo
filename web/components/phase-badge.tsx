@@ -1,11 +1,13 @@
 /**
  * 任务阶段徽章
- * 显示当前执行阶段：designer/planner/coder/reviewer/tester
+ * 显示当前执行阶段：discuss/designer/planner/coder/reviewer/tester
  */
 
 import type { Phase } from '@/lib/types';
+import { PHASE_ORDER } from '@/lib/types';
 
 const PHASE_ICONS: Record<Phase, string> = {
+  discuss:  '\u{1F4AC}',
   designer: '\u{1F3A8}',
   planner:  '\u{1F4CB}',
   coder:    '\u{1F4BB}',
@@ -14,6 +16,7 @@ const PHASE_ICONS: Record<Phase, string> = {
 };
 
 const PHASE_LABELS: Record<Phase, string> = {
+  discuss:  'Discuss',
   designer: 'Designer',
   planner:  'Planner',
   coder:    'Coder',
@@ -30,9 +33,9 @@ export function PhaseBadge({ phase }: { phase: Phase }) {
   );
 }
 
-/** 阶段进度条：显示 5 个阶段的完成情况 */
+/** 阶段进度条:展示完整 6 阶段的完成情况(顺序以 PHASE_ORDER 为准) */
 export function PhaseProgress({ currentPhase, status }: { currentPhase: Phase | null; status: string }) {
-  const phases: Phase[] = ['designer', 'planner', 'coder', 'reviewer', 'tester'];
+  const phases = PHASE_ORDER;
   const currentIdx = currentPhase ? phases.indexOf(currentPhase) : -1;
   const isCompleted = status === 'completed';
   const isFailed = status === 'failed';

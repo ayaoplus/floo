@@ -4,7 +4,7 @@
  */
 
 /** 任务执行阶段 */
-export type Phase = 'designer' | 'planner' | 'coder' | 'reviewer' | 'tester';
+export type Phase = 'discuss' | 'designer' | 'planner' | 'coder' | 'reviewer' | 'tester';
 
 /** Agent 运行时 */
 export type Runtime = 'claude' | 'codex';
@@ -88,5 +88,5 @@ export interface Notification {
   data: Record<string, unknown>;
 }
 
-/** 阶段流转顺序 */
-export const PHASE_ORDER: Phase[] = ['designer', 'planner', 'coder', 'reviewer', 'tester'];
+/** 阶段流转顺序(与 src/core/types.ts 保持一致) */
+export const PHASE_ORDER: Phase[] = ['discuss', 'designer', 'planner', 'coder', 'reviewer', 'tester'];

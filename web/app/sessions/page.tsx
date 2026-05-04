@@ -4,6 +4,7 @@
  */
 
 import { listSessions } from '@/lib/floo';
+import type { Phase } from '@/lib/types';
 import { PhaseBadge } from '@/components/phase-badge';
 import { EmptyState } from '@/components/empty-state';
 import { formatElapsed, formatRelative } from '@/components/duration';
@@ -98,7 +99,7 @@ function SessionCard({ session }: { session: { name: string; task_id: string; ph
         </div>
         <div className="flex items-center justify-between">
           <span className="text-xs text-stone-gray">Phase</span>
-          <PhaseBadge phase={session.phase as 'designer' | 'planner' | 'coder' | 'reviewer' | 'tester'} />
+          <PhaseBadge phase={session.phase as Phase} />
         </div>
         <div className="flex items-center justify-between">
           <span className="text-xs text-stone-gray">Uptime</span>
