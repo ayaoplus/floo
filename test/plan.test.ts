@@ -430,6 +430,90 @@ console.log('\n=== 8d. Step 4d: plan 拓扑查询 helper ===');
 }
 
 // ============================================================
+// 8e. Step 6 review #2 修复:materializeTemplate 把模板物化为实际执行的 PlanYaml
+// ============================================================
+
+console.log('\n=== 8e. materializeTemplate: 模板 → 实际执行的 PlanYaml ===');
+
+{
+  const { materializeTemplate, loadTemplate } = await import('../src/core/index.js');
+  const fakeBatch: Batch = {
+    id: '2026-05-05-mat-test',
+    description: 'mat test',
+    status: 'active',
+    tasks: ['t-001'],
+    created_at: '2026-05-05T10:00:00Z',
+    updated_at: '2026-05-05T10:00:00Z',
+  };
+  const fakeTask: Task = {
+    id: 't-001',
+    batch_id: fakeBatch.id,
+    description: 'mat',
+    status: 'pending',
+    current_phase: null,
+    scope: ['src/foo.ts'],
+    acceptance_criteria: [],
+    review_level: 'full',
+    created_at: fakeBatch.created_at,
+    updated_at: fakeBatch.updated_at,
+    depends_on: [],
+  };
+
+  // quick.yaml = coder + reviewer。materialize 后 plan.steps 长度应等于 2,不是 6
+  const quick = await loadTemplate('quick');
+  const yamlFromQuick = materializeTemplate({
+    template: quick,
+    batch: fakeBatch,
+    task: fakeTask,
+    config: DEFAULT_CONFIG,
+  });
+  assert(yamlFromQuick.steps.length === quick.steps.length,
+    'materialize(quick).steps.length 等于模板 step 数(不再是 6 阶段镜像)');
+  assert(yamlFromQuick.steps[0].capability === 'coder', 'quick step 0 = coder');
+  assert(yamlFromQuick.steps[1].capability === 'reviewer', 'quick step 1 = reviewer');
+  assert(yamlFromQuick.start_phase === 'coder', 'start_phase = 模板首步 capability');
+  assert(yamlFromQuick.notes.some(n => n.includes('quick')), 'notes 标注模板来源');
+
+  // runtime/model 从 config.roles 取
+  assert(yamlFromQuick.steps[0].runtime === DEFAULT_CONFIG.roles.coder.runtime,
+    'runtime 从 config.roles[coder] 取');
+  assert(yamlFromQuick.steps[0].model === DEFAULT_CONFIG.roles.coder.model,
+    'model 从 config.roles[coder] 取');
+
+  // scope 透传:quick coder step 标 scope: 'task'
+  assert(JSON.stringify(yamlFromQuick.steps[0].scope) === JSON.stringify(fakeTask.scope),
+    'scope: "task" 被透传成 task.scope');
+
+  // feature.yaml = 6 阶段
+  const feature = await loadTemplate('feature');
+  const yamlFromFeature = materializeTemplate({
+    template: feature,
+    batch: fakeBatch,
+    task: fakeTask,
+    config: DEFAULT_CONFIG,
+  });
+  assert(yamlFromFeature.steps.length === feature.steps.length,
+    'materialize(feature).steps.length 等于模板 step 数');
+  assert(yamlFromFeature.start_phase === 'discuss', 'feature start_phase = discuss');
+
+  // 空模板抛错
+  let threw = false;
+  try {
+    materializeTemplate({
+      template: { schema_version: 1, name: 'empty', steps: [] },
+      batch: fakeBatch,
+      task: fakeTask,
+      config: DEFAULT_CONFIG,
+    });
+  } catch (err) {
+    threw = true;
+    const msg = err instanceof Error ? err.message : String(err);
+    assert(msg.includes('没有 steps'), '空模板抛错信息说明原因');
+  }
+  assert(threw, '空模板触发抛错');
+}
+
+// ============================================================
 // 9. Step 4e: PHASE_ORDER 由 feature.yaml 派生
 // ============================================================
 

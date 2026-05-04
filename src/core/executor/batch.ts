@@ -23,6 +23,7 @@ import { ensureFlooDir, detectConflicts } from '../scope.js';
 import { notify } from '../notifications.js';
 import {
   synthesizeInitialPlan,
+  materializeTemplate,
   writePlan,
   planHasComplexCapability,
   planHasDiscussDesignerLoop,
@@ -248,9 +249,15 @@ export async function createAndRun(
   };
   await saveTask(flooDir, mainTask);
 
-  // Step 1 镜像 plan:落盘开局快照,dispatcher 不消费,仅作 ledger 锚点
+  // 落盘 plan.yaml:
+  //   - 有 opts.plan(--mode 模板路径):用 materializeTemplate 把模板物化成实际执行的 plan,
+  //     plan.steps 等于真正会跑的 step 序列(codex review #2 修复——避免 plan.yaml 与
+  //     实际执行序列脱节,导致 Step 6 plan-patch 在错的图上 apply)
+  //   - 无 opts.plan(老路径):synthesizeInitialPlan 生成 6 阶段镜像兜底
   try {
-    const initialPlan = synthesizeInitialPlan({ batch, task: mainTask, startPhase, config });
+    const initialPlan = opts.plan
+      ? materializeTemplate({ template: opts.plan, batch, task: mainTask, config })
+      : synthesizeInitialPlan({ batch, task: mainTask, startPhase, config });
     await writePlan(flooDir, initialPlan);
   } catch (err) {
     await log(flooDir, 'plan-mirror-write-failed', { batch: batchId, error: String(err) });

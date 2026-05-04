@@ -215,6 +215,71 @@ function synthesizeSteps(args: {
 }
 
 /**
+ * 基于 PlanTemplate + batch + task + config 合成 PlanYaml(实际执行的 plan ledger)。
+ *
+ * 用途:codex review #2 修复——createAndRun 在传入 opts.plan 时,落盘 plan.yaml
+ * 应当反映实际执行的 plan(plan.steps 来自模板),而不是 synthesizeInitialPlan 的
+ * 理论 6 阶段镜像。否则 Step 6 plan-patch 会 apply 在错的图上。
+ *
+ * 字段映射:
+ *   - 每个 PlanTemplateStep 物化成 PlanStep,runtime/model 缺失时从 config.roles[cap] 取
+ *   - scope 字段:'task' 透传 task.scope;数组直接用;undefined → []
+ *   - start_phase = plan.steps[0].capability(模板首步)
+ */
+export function materializeTemplate(args: {
+  template: PlanTemplate;
+  batch: Batch;
+  task: Task;
+  config: FlooConfig;
+}): PlanYaml {
+  const { template, batch, task, config } = args;
+  if (template.steps.length === 0) {
+    throw new Error(`materializeTemplate: 模板 "${template.name}" 没有 steps`);
+  }
+  const startPhase = template.steps[0].capability;
+  const steps: PlanStep[] = template.steps.map(ts => {
+    const role = config.roles[ts.capability];
+    if (!role) {
+      throw new Error(
+        `materializeTemplate: 模板 "${template.name}" step "${ts.id}" capability=${ts.capability} 在 config.roles 中无定义`,
+      );
+    }
+    const scope = ts.scope === 'task' ? task.scope
+      : (Array.isArray(ts.scope) ? ts.scope : []);
+    return {
+      id: ts.id,
+      capability: ts.capability,
+      runtime: ts.runtime ?? role.runtime,
+      model: ts.model ?? role.model,
+      depends_on: ts.depends_on ?? [],
+      scope,
+      status: ts.status ?? 'pending',
+    };
+  });
+
+  return {
+    schema_version: 1,
+    batch_id: batch.id,
+    created_at: batch.created_at,
+    description: batch.description,
+    mode: 'legacy-dispatcher',  // 仍由 dispatcher 驱动,Step 4 全部完成后才切 'executor'
+    start_phase: startPhase,
+    initial_task: {
+      id: task.id,
+      scope: task.scope,
+      acceptance_criteria: task.acceptance_criteria,
+      review_level: task.review_level,
+      depends_on: task.depends_on,
+    },
+    steps,
+    notes: [
+      `materialized from template "${template.name}"`,
+      'plan.steps 反映实际执行序列;plan-patch 在此基础上演化',
+    ],
+  };
+}
+
+/**
  * 基于 batch + initial task + startPhase 合成开局 plan.yaml 内容。
  *
  * 不副作用,纯函数,便于测试。
