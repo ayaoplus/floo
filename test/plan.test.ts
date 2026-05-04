@@ -470,6 +470,29 @@ console.log('\n=== 9. Step 4e: PHASE_ORDER 来源是 feature.yaml ===');
   const fallback = loadFeaturePhaseOrder(join(tmpdir(), 'floo-nonexistent', 'feature.yaml'));
   assert(fallback.length === 6, 'feature.yaml 不存在时 fallback 返回 6 阶段');
   assert(fallback[0] === 'discuss', 'fallback[0] 仍是 discuss');
+
+  // 回归 codex review #3 finding:capability 非法时走 fallback,而不是污染 PHASE_ORDER
+  // derivePhaseOrder 纯函数:遇到非法 capability 抛错
+  let threw = false;
+  try {
+    derivePhaseOrder({ steps: [{ capability: 'foobar' }] });
+  } catch (err) {
+    threw = true;
+    const msg = err instanceof Error ? err.message : String(err);
+    assert(msg.includes('foobar'), 'derivePhaseOrder 抛错信息含非法值');
+    assert(msg.includes('不是合法 Phase'), 'derivePhaseOrder 抛错信息说明原因');
+  }
+  assert(threw, '非法 capability 触发 derivePhaseOrder 抛错');
+
+  // loadFeaturePhaseOrder 捕获后走 fallback(yaml 含未知 capability 时不污染 PHASE_ORDER)
+  const badDir = join(tmpdir(), `floo-bad-cap-${Date.now()}`);
+  await mkdir(badDir, { recursive: true });
+  await writeFile(join(badDir, 'feature.yaml'),
+    'schema_version: 1\nname: feature\nsteps:\n  - id: a\n    capability: foobar\n');
+  const badResult = loadFeaturePhaseOrder(join(badDir, 'feature.yaml'));
+  assert(badResult.length === 6, '坏掉的 capability → fallback 6 阶段');
+  assert(badResult[0] === 'discuss', '坏掉的 capability → fallback[0] = discuss');
+  await rm(badDir, { recursive: true, force: true });
 }
 
 // ============================================================

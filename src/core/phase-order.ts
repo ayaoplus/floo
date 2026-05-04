@@ -29,6 +29,9 @@ const FALLBACK_PHASE_ORDER: readonly Phase[] = [
   'discuss', 'designer', 'planner', 'coder', 'reviewer', 'tester',
 ];
 
+/** Phase 联合类型的运行时枚举(与 types.ts:Phase 保持同步) */
+const VALID_PHASES = new Set<Phase>(FALLBACK_PHASE_ORDER);
+
 /** 计算 feature.yaml 文件的默认绝对路径(与 plan.ts:defaultTemplatesDir 同源) */
 function defaultFeatureYamlPath(): string {
   if (process.env.FLOO_TEMPLATES_DIR) {
@@ -44,16 +47,28 @@ function defaultFeatureYamlPath(): string {
 /**
  * 从模板对象派生 phase 顺序。纯函数,不接触文件系统,便于测试。
  *
- * @param template 任意带 steps[].capability 的对象;不强校验 schema(已由 plan.ts:validateTemplate 兜)
+ * @param template 任意带 steps[].capability 的对象
  * @returns capability 按出现顺序去重的 Phase 列表
+ * @throws 当某个 step 不是 object、缺 capability 字段、或 capability 不是合法 Phase 时抛错。
+ *         loadFeaturePhaseOrder 会捕获这些错误并触发 fallback,避免坏掉的 yaml 静默污染 PHASE_ORDER。
  */
 export function derivePhaseOrder(template: { steps: Array<{ capability: string }> }): Phase[] {
   const seen = new Set<string>();
   const order: Phase[] = [];
-  for (const step of template.steps) {
-    if (seen.has(step.capability)) continue;
-    seen.add(step.capability);
-    order.push(step.capability as Phase);
+  for (const [i, step] of template.steps.entries()) {
+    if (!step || typeof step !== 'object') {
+      throw new Error(`derivePhaseOrder: steps[${i}] 不是 object`);
+    }
+    const cap = step.capability;
+    if (typeof cap !== 'string' || !VALID_PHASES.has(cap as Phase)) {
+      throw new Error(
+        `derivePhaseOrder: steps[${i}].capability "${String(cap)}" 不是合法 Phase ` +
+          `(允许:${[...VALID_PHASES].join('/')})`,
+      );
+    }
+    if (seen.has(cap)) continue;
+    seen.add(cap);
+    order.push(cap as Phase);
   }
   return order;
 }
@@ -93,8 +108,13 @@ export function loadFeaturePhaseOrder(yamlPath?: string): Phase[] {
     console.warn('[floo] feature.yaml 缺 steps[] 或为空,用 fallback');
     return [...FALLBACK_PHASE_ORDER];
   }
-  // 走纯函数派生
-  return derivePhaseOrder({ steps: steps as Array<{ capability: string }> });
+  // 走纯函数派生;校验失败(缺 capability / 非法 Phase)走 fallback,避免污染 PHASE_ORDER
+  try {
+    return derivePhaseOrder({ steps: steps as Array<{ capability: string }> });
+  } catch (err) {
+    console.warn(`[floo] feature.yaml 派生失败: ${err instanceof Error ? err.message : err},用 fallback`);
+    return [...FALLBACK_PHASE_ORDER];
+  }
 }
 
 /**
