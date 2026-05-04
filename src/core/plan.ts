@@ -10,8 +10,9 @@
  *   - mode='legacy-dispatcher' 标记当前是镜像快照,Step 4 之后会出现 mode='executor'。
  */
 
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 
 import {
@@ -280,4 +281,150 @@ export async function readPlan(flooDir: string, batchId: string): Promise<PlanYa
     throw new Error(`plan.yaml 解析失败:${batchId}`);
   }
   return parsed as PlanYaml;
+}
+
+// ============================================================
+// Plan Template (Step 2)
+// ============================================================
+
+/**
+ * 模板 step 的 scope 声明:
+ *   - 'task' (字符串字面量):透传 task.scope
+ *   - string[]:字面 scope 列表
+ *   - undefined:空 scope
+ */
+export type PlanTemplateScope = 'task' | string[] | undefined;
+
+/** 模板内的单个 step,只描述拓扑骨架,运行时字段由 synthesize 阶段填 */
+export interface PlanTemplateStep {
+  id: string;
+  capability: Phase;
+  depends_on?: string[];
+  scope?: PlanTemplateScope;
+  /** Step 4 飞轮过渡:标记本 step 与哪个 step 形成循环(reviewer ↔ implement / discuss ↔ designer) */
+  loop_with?: string;
+  /** 当某 step 完成后,本节点的具体形态才能确定。Step 1 镜像里把这类标记的节点状态置为 deferred */
+  defer_after?: string;
+  /** 显式指定 status,覆盖 defer_after 推断;模板里通常不写,留默认 pending 由 synthesize 推断 */
+  status?: PlanStepStatus;
+  /** 模板里很少强制 runtime/model;留空时 synthesize 阶段从 config.roles 取 */
+  runtime?: Runtime;
+  model?: string;
+}
+
+/** 顶层 plan template 结构 */
+export interface PlanTemplate {
+  schema_version: 1;
+  name: string;
+  description?: string;
+  steps: PlanTemplateStep[];
+}
+
+/**
+ * 默认模板根目录:
+ *   优先级 = 显式参数 > FLOO_TEMPLATES_DIR 环境变量 > package 内置 templates/plans/
+ *
+ * 内置目录基于 src/core/plan.ts 自身位置反推,既支持源码 tsx 运行,也支持 dist/ 安装态。
+ */
+function defaultTemplatesDir(): string {
+  if (process.env.FLOO_TEMPLATES_DIR) return process.env.FLOO_TEMPLATES_DIR;
+  const here = fileURLToPath(import.meta.url);
+  // 源码态:src/core/plan.ts → 包根 = ../../  → templates/plans/
+  // 编译态:dist/core/plan.js → 包根 = ../../  → templates/plans/
+  const packageRoot = join(dirname(here), '..', '..');
+  return join(packageRoot, 'templates', 'plans');
+}
+
+/** 模板路径计算 */
+export function planTemplatePath(name: string, baseDir?: string): string {
+  return join(baseDir ?? defaultTemplatesDir(), `${name}.yaml`);
+}
+
+/**
+ * 加载模板 + schema 校验。同步 IO 不暴露异步签名,因为这是模块级一次性加载需求,
+ * 但 fs 操作仍走 promises API(避免引入 sync IO 的代码风格)。
+ *
+ * @throws 如果文件不存在 / yaml 格式错误 / schema 不通过
+ */
+export async function loadTemplate(name: string, baseDir?: string): Promise<PlanTemplate> {
+  const path = planTemplatePath(name, baseDir);
+  let raw: string;
+  try {
+    raw = await readFile(path, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`plan template 不存在:${name} (查找路径 ${path})`);
+    }
+    throw err;
+  }
+  const parsed = parseYaml(raw) as unknown;
+  return validateTemplate(parsed, name);
+}
+
+/** schema 校验:返回结构化对象,失败抛 Error 含定位信息 */
+export function validateTemplate(parsed: unknown, name: string): PlanTemplate {
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`plan template ${name}: 顶层不是 object`);
+  }
+  const obj = parsed as Record<string, unknown>;
+  if (obj.schema_version !== 1) {
+    throw new Error(`plan template ${name}: schema_version 必须为 1,实际 ${obj.schema_version}`);
+  }
+  if (typeof obj.name !== 'string' || obj.name.length === 0) {
+    throw new Error(`plan template ${name}: name 字段缺失或非字符串`);
+  }
+  if (!Array.isArray(obj.steps) || obj.steps.length === 0) {
+    throw new Error(`plan template ${name}: steps 必须是非空数组`);
+  }
+
+  const validCaps = new Set<Phase>(PHASE_ORDER);
+  const seenIds = new Set<string>();
+  const steps: PlanTemplateStep[] = obj.steps.map((s, idx) => {
+    if (!s || typeof s !== 'object') {
+      throw new Error(`plan template ${name}: steps[${idx}] 不是 object`);
+    }
+    const step = s as Record<string, unknown>;
+    if (typeof step.id !== 'string' || step.id.length === 0) {
+      throw new Error(`plan template ${name}: steps[${idx}].id 缺失或非字符串`);
+    }
+    if (seenIds.has(step.id)) {
+      throw new Error(`plan template ${name}: steps[${idx}].id "${step.id}" 重复`);
+    }
+    seenIds.add(step.id);
+    if (typeof step.capability !== 'string' || !validCaps.has(step.capability as Phase)) {
+      throw new Error(
+        `plan template ${name}: steps[${idx}].capability "${step.capability}" 非法 (允许:${[...validCaps].join('/')})`,
+      );
+    }
+    const dependsOn = step.depends_on;
+    if (dependsOn !== undefined) {
+      if (!Array.isArray(dependsOn) || !dependsOn.every(d => typeof d === 'string')) {
+        throw new Error(`plan template ${name}: steps[${idx}].depends_on 必须是 string[]`);
+      }
+      // 校验依赖 id 必须在前面已声明
+      for (const dep of dependsOn) {
+        if (!seenIds.has(dep) && dep !== step.id) {
+          throw new Error(`plan template ${name}: steps[${idx}] 引用未声明的依赖 "${dep}"`);
+        }
+      }
+    }
+    return {
+      id: step.id,
+      capability: step.capability as Phase,
+      ...(dependsOn ? { depends_on: dependsOn as string[] } : {}),
+      ...(step.scope !== undefined ? { scope: step.scope as PlanTemplateScope } : {}),
+      ...(typeof step.loop_with === 'string' ? { loop_with: step.loop_with } : {}),
+      ...(typeof step.defer_after === 'string' ? { defer_after: step.defer_after } : {}),
+      ...(typeof step.status === 'string' ? { status: step.status as PlanStepStatus } : {}),
+      ...(typeof step.runtime === 'string' ? { runtime: step.runtime as Runtime } : {}),
+      ...(typeof step.model === 'string' ? { model: step.model } : {}),
+    };
+  });
+
+  return {
+    schema_version: 1,
+    name: obj.name,
+    ...(typeof obj.description === 'string' ? { description: obj.description } : {}),
+    steps,
+  };
 }

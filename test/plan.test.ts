@@ -13,10 +13,13 @@ import {
   writePlan,
   readPlan,
   planYamlPath,
+  loadTemplate,
+  validateTemplate,
+  planTemplatePath,
   DEFAULT_CONFIG,
 } from '../src/core/index.js';
 import type { Batch, Task, Phase } from '../src/core/index.js';
-import { mkdir, rm, readFile } from 'node:fs/promises';
+import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -216,6 +219,138 @@ console.log('\n=== 6. Step 1 镜像反映 config.roles,不读 task.role_override
   const reviewerStep = plan.steps.find(s => s.capability === 'reviewer')!;
   assert(reviewerStep.runtime === 'codex', 'Step 1 镜像 reviewer.runtime = codex (默认绑定,忽略 task.role_overrides)');
   // 这是有意为之的简化,Step 4 executor 落地后才会消费 role_overrides
+}
+
+// ============================================================
+// 7. loadTemplate: 内置 feature.yaml(Step 2)
+// ============================================================
+
+console.log('\n=== 7. loadTemplate: 内置 feature.yaml ===');
+
+{
+  const tpl = await loadTemplate('feature');
+  assert(tpl.schema_version === 1, 'feature.yaml schema_version = 1');
+  assert(tpl.name === 'feature', 'feature.yaml name = feature');
+  assert(typeof tpl.description === 'string' && tpl.description.length > 0, 'feature.yaml 含 description');
+  // step 顺序应当对齐 PHASE_ORDER 的 6 阶段语义,前 3 步是 discuss/designer/planner
+  assert(tpl.steps.length === 6, 'feature.yaml 含 6 个 step');
+  assert(tpl.steps[0].capability === 'discuss', 'step 0 = discuss');
+  assert(tpl.steps[1].capability === 'designer', 'step 1 = designer');
+  assert(tpl.steps[2].capability === 'planner', 'step 2 = planner');
+  assert(tpl.steps[3].capability === 'coder', 'step 3 = coder');
+  assert(tpl.steps[4].capability === 'reviewer', 'step 4 = reviewer');
+  assert(tpl.steps[5].capability === 'tester', 'step 5 = tester');
+  // 飞轮标记
+  assert(tpl.steps[0].loop_with === 'designer', 'discuss 标 loop_with: designer');
+  assert(tpl.steps[4].loop_with === 'implement', 'reviewer 标 loop_with: implement');
+  // defer_after 标记
+  assert(tpl.steps[3].defer_after === 'planner', 'implement 标 defer_after: planner');
+  // 依赖
+  assert(tpl.steps[1].depends_on?.[0] === 'discuss', 'designer depends_on discuss');
+  const testerDeps = tpl.steps[5].depends_on ?? [];
+  assert(testerDeps.includes('implement') && testerDeps.includes('review'), 'tester 依赖 implement + review');
+  // scope
+  assert(tpl.steps[3].scope === 'task', 'implement scope = task (透传 task.scope)');
+}
+
+console.log('\n=== 7b. loadTemplate: 不存在的模板抛错 ===');
+
+try {
+  await loadTemplate('no-such-template');
+  assert(false, '应该抛错');
+} catch (err) {
+  assert(err instanceof Error && err.message.includes('不存在'), '不存在的模板抛 Error 含定位信息');
+}
+
+console.log('\n=== 7c. loadTemplate: FLOO_TEMPLATES_DIR 环境变量覆盖 ===');
+
+{
+  const envTmpDir = join(tmpdir(), `floo-template-test-${Date.now()}`);
+  await mkdir(envTmpDir, { recursive: true });
+  await writeFile(
+    join(envTmpDir, 'minimal.yaml'),
+    [
+      'schema_version: 1',
+      'name: minimal',
+      'steps:',
+      '  - id: only',
+      '    capability: coder',
+    ].join('\n'),
+  );
+  const oldEnv = process.env.FLOO_TEMPLATES_DIR;
+  process.env.FLOO_TEMPLATES_DIR = envTmpDir;
+  try {
+    const tpl = await loadTemplate('minimal');
+    assert(tpl.name === 'minimal', '环境变量目录加载成功');
+    assert(tpl.steps.length === 1, '环境变量目录的模板 step 数正确');
+    // planTemplatePath 也应跟随环境变量
+    assert(planTemplatePath('minimal') === join(envTmpDir, 'minimal.yaml'), 'planTemplatePath 跟随 FLOO_TEMPLATES_DIR');
+  } finally {
+    if (oldEnv === undefined) delete process.env.FLOO_TEMPLATES_DIR;
+    else process.env.FLOO_TEMPLATES_DIR = oldEnv;
+    await rm(envTmpDir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 8. validateTemplate: schema 校验各种错误形态
+// ============================================================
+
+console.log('\n=== 8. validateTemplate: schema 错误形态 ===');
+
+function expectThrow(parse: unknown, name: string, contains: string, msg: string) {
+  try {
+    validateTemplate(parse, name);
+    assert(false, `${msg}:应该抛错 (含 "${contains}")`);
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    assert(errMsg.includes(contains), `${msg}:错误信息含 "${contains}" (实际:${errMsg})`);
+  }
+}
+
+expectThrow(null, 'x', '顶层不是 object', '顶层非 object');
+expectThrow({ schema_version: 2, name: 'x', steps: [{ id: 'a', capability: 'coder' }] }, 'x', 'schema_version', 'schema_version 错误');
+expectThrow({ schema_version: 1, steps: [] }, 'x', 'name', '缺 name');
+expectThrow({ schema_version: 1, name: 'x', steps: [] }, 'x', 'steps', 'steps 空');
+expectThrow(
+  { schema_version: 1, name: 'x', steps: [{ id: 'a', capability: 'unknown' }] },
+  'x',
+  '非法',
+  'capability 非法',
+);
+expectThrow(
+  { schema_version: 1, name: 'x', steps: [{ id: 'a', capability: 'coder' }, { id: 'a', capability: 'reviewer' }] },
+  'x',
+  '重复',
+  'id 重复',
+);
+expectThrow(
+  { schema_version: 1, name: 'x', steps: [{ id: 'a', capability: 'coder', depends_on: ['nonexistent'] }] },
+  'x',
+  '未声明',
+  '依赖未声明 step',
+);
+
+// 合法情况:不抛错
+{
+  const tpl = validateTemplate(
+    { schema_version: 1, name: 'x', steps: [{ id: 'a', capability: 'coder' }] },
+    'x',
+  );
+  assert(tpl.steps[0].id === 'a', '合法模板正常返回');
+}
+
+// ============================================================
+// 9. Step 2 不影响 dispatcher 行为(放在这里只做提示性 assert)
+// ============================================================
+
+console.log('\n=== 9. Step 2 不消费模板:PHASE_ORDER 仍是硬编码 ===');
+
+{
+  // PHASE_ORDER 来源在 types.ts,Step 2 没改
+  const { PHASE_ORDER } = await import('../src/core/index.js');
+  assert(PHASE_ORDER.length === 6, 'PHASE_ORDER 仍是硬编码 6 阶段');
+  assert(PHASE_ORDER[0] === 'discuss', 'PHASE_ORDER[0] 不受 feature.yaml 影响');
 }
 
 // ============================================================

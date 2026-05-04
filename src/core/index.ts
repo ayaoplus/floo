@@ -53,12 +53,19 @@ export { cleanOrphanSessions, detectStaleTasks, rotateLogs, runHealthCheck, type
 export { addLesson, extractLesson, listLessons, distillRules, type Lesson, type LessonRecord } from './lessons.js';
 
 // Plan (Step 1: 镜像快照,dispatcher 不消费,Step 4 后 executor 才会真正驱动)
+// Plan template (Step 2: loadTemplate 提供模板加载,模板尚未被消费)
 export {
   synthesizeInitialPlan,
   writePlan,
   readPlan,
   planYamlPath,
+  loadTemplate,
+  validateTemplate,
+  planTemplatePath,
   type PlanYaml,
   type PlanStep,
   type PlanStepStatus,
+  type PlanTemplate,
+  type PlanTemplateStep,
+  type PlanTemplateScope,
 } from './plan.js';

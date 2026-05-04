@@ -1,0 +1,67 @@
+# Feature plan template
+#
+# 状态(2026-05-04):此文件由 Step 2 引入,目前**不被 dispatcher 消费**。
+# 它是当前固定 6 阶段管线 (discuss → designer → planner → coder → reviewer → tester)
+# 的等价文档,作为 Step 4 落 executor 时的接入点。
+#
+# 在 Step 4 之前:
+#   - dispatcher.ts 仍按 PHASE_ORDER 硬编码顺序推进;
+#   - 用户编辑此文件不会改变 Floo 行为;
+#   - 此文件存在的意义是:UI / loadTemplate 单测有 fixture,
+#     以及给后续 Step 4 一个明确的"目标态行为契约"参考。
+#
+# Schema:
+#   schema_version: 模板格式版本号,不兼容变更要 bump
+#   name:           模板名,与 templates/plans/<name>.yaml 文件名一致
+#   description:    一句话说明这个模板的用途
+#   steps:          step 列表
+#     id:           节点 ID,在 plan 内唯一
+#     capability:   Phase 名 (discuss/designer/planner/coder/reviewer/tester)
+#     depends_on:   依赖的 step id 列表
+#     scope:        'task' = 透传 task.scope; 字面字符串列表 = 字面 scope; 缺省 = []
+#     loop_with:    Step 4 飞轮过渡用,本模板暂不消费
+#     defer_after:  step id;表示当此 step 完成后,后续标 deferred 的节点才能确定
+#     status:       'pending' (默认) | 'deferred' (planner 拆 task 后才知道具体形态)
+
+schema_version: 1
+name: feature
+description: 完整 6 阶段流程,适用于需要从需求澄清到测试验证的常规任务
+
+steps:
+  - id: discuss
+    capability: discuss
+    depends_on: []
+    # discuss 与 designer 之间有"反向质疑"飞轮(designer 输出 blocker → 回 discuss round 2)。
+    # Step 4 落 executor 后通过 loop_with 标记承接;当前不消费。
+    loop_with: designer
+
+  - id: designer
+    capability: designer
+    depends_on: [discuss]
+
+  - id: planner
+    capability: planner
+    depends_on: [designer]
+
+  # planner 之后的 coder/reviewer/tester 节点数 = planner 拆出的 task 数。
+  # Step 1 镜像在每条 task 链上展开成 implement-deferred / review-deferred / test-deferred 占位;
+  # Step 4 executor 会在 planner 完成后基于 plan.md 拆出真实 step 列表。
+  - id: implement
+    capability: coder
+    depends_on: [planner]
+    scope: task
+    defer_after: planner
+
+  - id: review
+    capability: reviewer
+    depends_on: [implement]
+    defer_after: planner
+    # reviewer fail → coder 重跑的循环。Step 4 由 plan-patch (Step 6) 取代,
+    # 当前 dispatcher 通过状态机内置循环承接。
+    loop_with: implement
+
+  - id: test
+    capability: tester
+    depends_on: [implement, review]
+    defer_after: planner
+    loop_with: implement
