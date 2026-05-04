@@ -405,10 +405,11 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 
 | Step | 状态 | 备注 |
 |------|------|------|
-| 1. plan.yaml 落盘(只读镜像) | ✅ Done | `src/core/plan.ts` + `test/plan.test.ts`(48 断言);commit `bddc89e` |
-| 2. templates/plans/ + loadTemplate(纯 loader,零行为变化) | ⬜ Pending | |
-| 3. Skill frontmatter | ⬜ Pending | Step 4 前置 |
-| 4. Executor 内化 + 模板驱动行为切换(dispatcher 退化为 shim) | ⬜ Pending | **核心步骤,需独立分支;首次承诺模板驱动行为变化** |
+| 1. plan.yaml 落盘(只读镜像) | ✅ Done | `src/core/plan.ts`;commit `bddc89e` |
+| 2. templates/plans/ + loadTemplate(纯 loader,零行为变化) | ✅ Done | `templates/plans/feature.yaml` + `loadTemplate()`;commit `9fc0730` |
+| 3. Skill frontmatter | ✅ Done | 6 个 skill 加 frontmatter,`loadSkillWithMetadata` API 上线,老 `loadSkill` 向后兼容;commit `2d450ad` |
+| 4a. Executor 模块上线(plan-driven 入口 facade) | ✅ Done | `src/core/executor.ts` 提供 `runPlan` / `runPlanFromDisk`,内部仍委托 `dispatcher.createAndRun`。API 契约固化,外部消费者可从 plan.yaml 启动 Floo;dispatcher 一行不动,294 断言全过 |
+| 4b. dispatcher 状态机搬入 executor + tiny/quick 模板 + router 改 | ⬜ Pending | **真正的"模板驱动行为变化"在这一步**。需独立分支,涉及搬迁 `runTask` / `runBatch` / 飞轮等。当前 PHASE_ORDER 仍硬编码 |
 | 5. Runtimes 进 config | ⬜ Pending | |
 | 6. Plan-patch | ⬜ Pending | |
 | 7. UI 改造 | ⬜ Pending | |

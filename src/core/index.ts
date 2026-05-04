@@ -41,6 +41,14 @@ export { routeTask } from './router.js';
 // Dispatcher
 export { runTask, createAndRun, type DispatcherOptions } from './dispatcher.js';
 
+// Executor (Step 4a: plan-driven 入口,内部仍委托 dispatcher;Step 4b 后状态机搬入)
+export {
+  runPlan,
+  runPlanFromDisk,
+  type ExecutorOptions,
+  type ExecutorResult,
+} from './executor.js';
+
 // Monitor
 export {
   getBatch,
