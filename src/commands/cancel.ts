@@ -59,6 +59,7 @@ export const cancelCommand = new Command('cancel')
         roles: { ...DEFAULT_CONFIG.roles, ...userConfig.roles },
         concurrency: { ...DEFAULT_CONFIG.concurrency, ...userConfig.concurrency },
         session: { ...DEFAULT_CONFIG.session, ...userConfig.session },
+        limits: { ...DEFAULT_CONFIG.limits, ...userConfig.limits },
         protected_files: userConfig.protected_files ?? DEFAULT_CONFIG.protected_files,
       };
     } catch { /* 使用默认配置 */ }
