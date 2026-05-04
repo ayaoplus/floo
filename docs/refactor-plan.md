@@ -400,16 +400,14 @@ flowchart TB
 
 ## Step 4: Executor 替换 Dispatcher (核心一步)
 
-> **当前进度(2026-05)**:Step 4 拆成 4a/4b/4c/4d/4e 五个子步,**4a/4b/4c 已 Done**,**4d/4e 仍 Pending**。
+> **当前进度(2026-05)**:Step 4 拆成 4a/4b/4c/4d/4e 五个子步,**4a/4b/4c/4d/4e 全部已 Done**。
 >
-> 已落地:executor facade 上线、dispatcher 1661→18 行 thin shim、tiny/quick/feature 模板、`floo run --mode`、PlanState 驱动 simple path(coder/reviewer/tester 起步)。
+> 已落地:executor facade 上线、dispatcher 1661→18 行 thin shim、tiny/quick/feature 模板、`floo run --mode`、PlanState 驱动 simple path、createAndRun 在 complex path 上按 plan 拓扑(loop_with / defer_after / capability)分流、PHASE_ORDER 从 feature.yaml 派生。
 >
-> 仍未落地(=尚未"模板驱动行为变化"的范围):
-> - **Complex path**:`createAndRun` 在 discuss/designer/planner 起步上仍走 dispatcher 时代的硬编码飞轮(`executor/batch.ts:191-196` 注释明示),不消费 plan.steps
-> - **`runPlan(plan, opts)`**:当 `plan.mode === 'executor'` 时仍抛 unsupported(`src/core/executor.ts:62`)
-> - **`PHASE_ORDER`**:仍是 types.ts 里的硬编码常量,未从 feature.yaml 派生
+> 仍未落地的更高阶目标:
+> - **`runPlan(plan, opts)`**:当 `plan.mode === 'executor'` 时仍抛 unsupported(`src/core/executor.ts:62`)。这条路径需要 Step 6 的 plan-patch 机制才能完整支撑(否则 executor 模式下飞轮无法表达),所以与 Step 4 解耦留待 Step 6 后启用。
 >
-> 因此当前 `floo run` 不带 `--mode` 走 6 阶段流程时,plan.yaml 仍然只是状态机的镜像快照,不影响行为。下面"目标"段落描述的是 Step 4 全部子步落地后的最终状态,不是当前现状。
+> Step 4 收尾后,用户编辑 `templates/plans/feature.yaml` 调整 phase 顺序、删除 phase、移除 loop_with 飞轮关系,均会被 `floo run --mode feature` 实际消费;`floo run` 不带 `--mode` 走老 startPhase 推断路径继续保持向后兼容。
 
 ### 目标
 
@@ -649,8 +647,8 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 | 4a. Executor 模块上线(plan-driven 入口 facade) | ✅ Done | `src/core/executor.ts` 提供 `runPlan` / `runPlanFromDisk`;commit `0188a47` |
 | 4b. dispatcher 退化 shim + 子模块化 + tiny/quick 模板 + `--mode` | ✅ Done | dispatcher.ts 1661 → 18 行 thin shim;状态机/飞轮/planner 拆分搬到 `executor/state-machine.ts` + `executor/batch.ts`;子模块拆分:io/artifacts/prompt/execute-step/verdict/planner/summary。`tiny.yaml` / `quick.yaml` + `templateToPhases()` + `floo run --mode tiny\|quick\|feature`;commits `bd15590`、`8bc56fa`、本次 |
 | 4c. PlanState-driven runTask + plan-driven createAndRun (simple path) | ✅ Done | `executor/state.ts` 提供 RunState + planStepsToRunSteps;runTask 内部用 RunState 驱动;新 `runTaskFromSteps` 入口消费外部 step 列表;createAndRun 接受 `opts.plan` 在 simple path 上真消费 plan.steps;`floo run --mode tiny\|quick` 现在 plan-driven |
-| 4d. 复杂 path plan-driven(飞轮 + planner 拆分) | ⬜ Pending | createAndRun 在 discuss/designer/planner 起步上仍硬编码飞轮;Step 4d 改为消费 plan 中的 loop_with / defer_after 标记 |
-| 4e. PHASE_ORDER 从 feature.yaml 派生(消除硬编码常量) | ⬜ Pending | types.ts 的 PHASE_ORDER 改为从 templates/plans/feature.yaml 启动时加载;`makeStepsForPhaseRange` / `runTask` 老路径都跟随 |
+| 4d. 复杂 path plan-driven(飞轮 + planner 拆分) | ✅ Done | `runBatchEntry` 改读 plan 拓扑(`planHasComplexCapability` / `planHasDiscussDesignerLoop` / `planHasPlanner` / `planHasPlannerExpansion`)决定 simple/wheel/planner/expansion 分支;不传 plan 时沿用老 startPhase 推断,行为零回归 |
+| 4e. PHASE_ORDER 从 feature.yaml 派生(消除硬编码常量) | ✅ Done | 新模块 `src/core/phase-order.ts` 启动期同步读 `templates/plans/feature.yaml` 派生;types.ts 改为 re-export 维持 import 兼容;读取/解析失败时 fallback 硬编码 + console.warn |
 | 5. Runtimes 进 config | ⬜ Pending | |
 | 6. Plan-patch | ⬜ Pending | |
 | 7. UI 改造 | ⬜ Pending | |

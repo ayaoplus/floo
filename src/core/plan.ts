@@ -384,6 +384,47 @@ export function templateToPhases(template: PlanTemplate): { startPhase: Phase; e
   };
 }
 
+// ============================================================
+// Plan 拓扑查询 (Step 4d)
+//
+// 这组纯函数让 batch.runBatchEntry 不再硬编码 startPhase 判断分支,
+// 改为读 plan 拓扑(capability 出现情况 / loop_with / defer_after)决定:
+//   - simple path 还是 complex path
+//   - 是否触发 discuss-designer 飞轮
+//   - 是否在 planner 后拆 task
+// ============================================================
+
+/** plan 中是否含有 discuss/designer/planner 任一 capability(决定 simple/complex 分流) */
+export function planHasComplexCapability(plan: PlanTemplate): boolean {
+  return plan.steps.some(s =>
+    s.capability === 'discuss' || s.capability === 'designer' || s.capability === 'planner');
+}
+
+/**
+ * plan 中是否存在 discuss → designer 飞轮关系。
+ *
+ * 判定:有 capability='discuss' 的 step 标了 loop_with,且指向的 step 的 capability='designer'。
+ * feature.yaml 默认满足此条件;用户写一个不带 discuss 的 plan(直接 designer 起步)时返回 false,
+ * 跳过飞轮直接进 planner。
+ */
+export function planHasDiscussDesignerLoop(plan: PlanTemplate): boolean {
+  return plan.steps.some(discussStep => {
+    if (discussStep.capability !== 'discuss' || !discussStep.loop_with) return false;
+    return plan.steps.some(other =>
+      other.id === discussStep.loop_with && other.capability === 'designer');
+  });
+}
+
+/** plan 中是否有 capability='planner' 的 step(决定是否调用 runPlannerStep) */
+export function planHasPlanner(plan: PlanTemplate): boolean {
+  return plan.steps.some(s => s.capability === 'planner');
+}
+
+/** plan 中是否有 defer_after='planner' 的 step(决定是否在 planner 后调 consumePlannerOutput 拆 task) */
+export function planHasPlannerExpansion(plan: PlanTemplate): boolean {
+  return plan.steps.some(s => s.defer_after === 'planner');
+}
+
 /** schema 校验:返回结构化对象,失败抛 Error 含定位信息 */
 export function validateTemplate(parsed: unknown, name: string): PlanTemplate {
   if (!parsed || typeof parsed !== 'object') {

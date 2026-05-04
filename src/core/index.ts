@@ -82,8 +82,9 @@ export { cleanOrphanSessions, detectStaleTasks, rotateLogs, runHealthCheck, type
 // Lessons
 export { addLesson, extractLesson, listLessons, distillRules, type Lesson, type LessonRecord } from './lessons.js';
 
-// Plan (Step 1: 镜像快照,dispatcher 不消费,Step 4 后 executor 才会真正驱动)
-// Plan template (Step 2: loadTemplate 提供模板加载,模板尚未被消费)
+// Plan (Step 1: 镜像快照)
+// Plan template (Step 2: loadTemplate 提供模板加载)
+// Plan 拓扑查询 (Step 4d: 让 batch.runBatchEntry 按 plan 决定分支)
 export {
   synthesizeInitialPlan,
   writePlan,
@@ -93,6 +94,10 @@ export {
   validateTemplate,
   planTemplatePath,
   templateToPhases,
+  planHasComplexCapability,
+  planHasDiscussDesignerLoop,
+  planHasPlanner,
+  planHasPlannerExpansion,
   type PlanYaml,
   type PlanStep,
   type PlanStepStatus,
@@ -100,3 +105,6 @@ export {
   type PlanTemplateStep,
   type PlanTemplateScope,
 } from './plan.js';
+
+// Phase order (Step 4e: 从 feature.yaml 派生)
+export { derivePhaseOrder, loadFeaturePhaseOrder } from './phase-order.js';

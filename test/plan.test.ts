@@ -19,7 +19,7 @@ import {
   templateToPhases,
   DEFAULT_CONFIG,
 } from '../src/core/index.js';
-import type { Batch, Task, Phase } from '../src/core/index.js';
+import type { Batch, Task, Phase, PlanTemplate } from '../src/core/index.js';
 import { mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -375,6 +375,58 @@ console.log('\n=== 8c. templateToPhases: feature 完整流程 endPhase=undefined
   const phases = templateToPhases(feature);
   assert(phases.startPhase === 'discuss', 'feature startPhase = discuss');
   assert(phases.endPhase === undefined, 'feature endPhase=undefined(走到流程结尾)');
+}
+
+// ============================================================
+// 8d. Step 4d: plan 拓扑查询 helper (用于 batch 分流判定)
+// ============================================================
+
+console.log('\n=== 8d. Step 4d: plan 拓扑查询 helper ===');
+
+{
+  const {
+    planHasComplexCapability,
+    planHasDiscussDesignerLoop,
+    planHasPlanner,
+    planHasPlannerExpansion,
+  } = await import('../src/core/index.js');
+
+  // 默认 feature.yaml 应满足全部条件
+  const feature = await loadTemplate('feature');
+  assert(planHasComplexCapability(feature), 'feature.yaml 含 discuss/designer/planner → complex path');
+  assert(planHasDiscussDesignerLoop(feature), 'feature.yaml 含 discuss + loop_with: designer → 触发飞轮');
+  assert(planHasPlanner(feature), 'feature.yaml 含 planner step');
+  assert(planHasPlannerExpansion(feature), 'feature.yaml 含 defer_after: planner → 触发拆分');
+
+  // quick.yaml: 只有 coder + reviewer,全部应为 false
+  const quick = await loadTemplate('quick');
+  assert(!planHasComplexCapability(quick), 'quick.yaml 不含 discuss/designer/planner → simple path');
+  assert(!planHasDiscussDesignerLoop(quick), 'quick.yaml 不触发飞轮');
+  assert(!planHasPlanner(quick), 'quick.yaml 无 planner step');
+  assert(!planHasPlannerExpansion(quick), 'quick.yaml 无拆分');
+
+  // 自定义 plan:designer-only(没 discuss),不应触发飞轮但是 complex path
+  const designerOnly: PlanTemplate = {
+    schema_version: 1,
+    name: 'designer-only',
+    steps: [{ id: 'd', capability: 'designer' }],
+  };
+  assert(planHasComplexCapability(designerOnly), 'designer-only → complex path');
+  assert(!planHasDiscussDesignerLoop(designerOnly), 'designer-only 不触发飞轮(无 discuss step)');
+  assert(!planHasPlanner(designerOnly), 'designer-only 无 planner');
+  assert(!planHasPlannerExpansion(designerOnly), 'designer-only 无拆分');
+
+  // 自定义 plan:discuss + designer 但无 loop_with,不应触发飞轮
+  const noLoop: PlanTemplate = {
+    schema_version: 1,
+    name: 'no-loop',
+    steps: [
+      { id: 'd1', capability: 'discuss' },
+      { id: 'd2', capability: 'designer', depends_on: ['d1'] },
+    ],
+  };
+  assert(planHasComplexCapability(noLoop), 'no-loop 仍是 complex path');
+  assert(!planHasDiscussDesignerLoop(noLoop), 'discuss + designer 但无 loop_with → 不飞轮');
 }
 
 // ============================================================

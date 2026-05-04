@@ -21,7 +21,15 @@ import {
 } from '../types.js';
 import { ensureFlooDir, detectConflicts } from '../scope.js';
 import { notify } from '../notifications.js';
-import { synthesizeInitialPlan, writePlan, type PlanTemplate } from '../plan.js';
+import {
+  synthesizeInitialPlan,
+  writePlan,
+  planHasComplexCapability,
+  planHasDiscussDesignerLoop,
+  planHasPlanner,
+  planHasPlannerExpansion,
+  type PlanTemplate,
+} from '../plan.js';
 
 import { log, saveTask, saveBatch, deriveBatchToken } from './io.js';
 import {
@@ -177,10 +185,14 @@ export async function runBatch(
 /**
  * 创建批次和任务,启动执行。这是 `floo run` 的核心入口。
  *
- * 流程:
- *   1. coder/reviewer/tester 起步:跳过 planner,直接 runTask
- *   2. discuss/designer 起步:走飞轮(designer 反馈 blocker → 回 discuss round 2)
- *   3. planner 完成:consumePlannerOutput 拆子任务 → runBatch 并行调度
+ * 分流(Step 4d 起 plan-driven):
+ *   plan 缺省:走老路径 startPhase 推断(coder/reviewer/tester→simple path,
+ *              否则飞轮+planner+拆分)
+ *   plan 存在:按 plan 拓扑判断
+ *     - 仅 coder/reviewer/tester capability       → simple path
+ *     - 含 discuss step + loop_with: designer     → 飞轮
+ *     - 含 capability='planner' step              → 跑 planner
+ *     - 含 defer_after='planner' step             → planner 后拆 task
  */
 export async function createAndRun(
   description: string,
@@ -189,9 +201,10 @@ export async function createAndRun(
     scope?: string[];
     endPhase?: Phase;
     /**
-     * 可选 plan 模板。simple path(coder/reviewer/tester 起步)上,
-     * 如果给了 plan 则直接消费 plan.steps 驱动执行,而不是从 PHASE_ORDER 派生。
-     * 复杂 path(discuss/designer/planner)目前仍走飞轮硬编码,Step 4d 后才消费 plan。
+     * 可选 plan 模板。Step 4d 起 simple path 与 complex path 均消费 plan.steps:
+     *   - simple path 用 plan.steps 驱动 step 序列,不再从 PHASE_ORDER 派生
+     *   - complex path 用 plan 中的 loop_with / defer_after / capability 判断分支
+     * 不传 plan 时沿用老 startPhase 推断,行为与 4d 落地前一致。
      */
     plan?: PlanTemplate;
   },
@@ -279,7 +292,7 @@ export async function createAndRun(
 
 async function runBatchEntry(
   startPhase: Phase,
-  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase },
+  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase; plan?: PlanTemplate },
   batch: Batch,
   mainTask: Task,
   batchId: string,
@@ -287,34 +300,70 @@ async function runBatchEntry(
   flooDir: string,
   projectRoot: string,
 ): Promise<{ batch: Batch; tasks: Task[] }> {
-  const { adapters } = opts;
+  const { adapters, plan } = opts;
 
-  // coder 或更后的 phase 起步:跳过 planner,直接 runTask
+  // ---- 分支判定 (Step 4d):plan 优先,缺省时 fallback 到 startPhase 推断 ----
+  //
+  // 规则:plan 中的拓扑结构是行为来源——
+  //   simple path  = plan 不含 discuss/designer/planner 中任何一个 capability
+  //   飞轮        = plan 含 discuss step,且与某个 designer step 互为 loop_with
+  //   planner step = plan 含 capability='planner' 的 step
+  //   拆分        = plan 含 defer_after='planner' 的 step
+  //
+  // 不传 plan 时(`floo run` 不带 --mode)沿用老 startPhase 推断,与 4d 落地前
+  // 行为完全一致——避免回归。
   const startIdx = PHASE_ORDER.indexOf(startPhase);
   const coderIdx = PHASE_ORDER.indexOf('coder');
-  if (startIdx >= coderIdx) {
+  const isSimple = plan ? !planHasComplexCapability(plan) : (startIdx >= coderIdx);
+  if (isSimple) {
     return runSimplePath(startPhase, opts, batch, mainTask, batchId, config, flooDir, projectRoot);
   }
 
-  // 前置 phase 链 (discuss/designer/planner)
+  // 复杂 path:前置 phase 链 (discuss/designer/planner)
   mainTask.status = 'running';
   await saveTask(flooDir, mainTask);
 
   // runCounter 跨 phase 递增,保证 runs/ 目录下每条记录的 ID 有序
   const ctx: WheelCtx = { preRunCounter: 0, batch, mainTask, batchId, config, flooDir, projectRoot, adapters, opts };
 
-  // 飞轮(只在 startPhase 落 discuss/designer 时跑)
-  if (startPhase === 'discuss' || startPhase === 'designer') {
+  // 飞轮:plan 中 loop_with 关系优先,fallback 到 startPhase
+  const shouldWheel = plan
+    ? planHasDiscussDesignerLoop(plan)
+    : (startPhase === 'discuss' || startPhase === 'designer');
+  if (shouldWheel) {
     const wheelResult = await runDiscussDesignerWheel(startPhase, ctx);
     if (wheelResult) return wheelResult;
   }
 
-  // 跑 planner
-  const plannerResult = await runPlannerStep(ctx);
-  if ('return' in plannerResult) return plannerResult.return;
+  // planner:plan 显式声明才跑;无 plan 时沿用老路径(必跑)
+  const shouldPlanner = plan ? planHasPlanner(plan) : true;
+  if (shouldPlanner) {
+    const plannerResult = await runPlannerStep(ctx);
+    if ('return' in plannerResult) return plannerResult.return;
+  }
 
-  // 拆子任务并跑后续
-  return runPostPlannerExpansion(ctx);
+  // 拆分:plan 中有 defer_after: planner 的 step;无 plan 时沿用老路径(必拆分)
+  const shouldExpand = plan ? planHasPlannerExpansion(plan) : true;
+  if (shouldExpand) {
+    return runPostPlannerExpansion(ctx);
+  }
+
+  // 既无 planner 又无拆分:complex path 走完飞轮就结束(用户自定义 designer-only plan)
+  return finalizeBatchSuccess(ctx);
+}
+
+/** 复杂 path 走完没有 planner/expansion 时的统一收尾(主任务标 completed + batch.status) */
+async function finalizeBatchSuccess(ctx: WheelCtx): Promise<{ batch: Batch; tasks: Task[] }> {
+  ctx.mainTask.status = 'completed';
+  ctx.mainTask.current_phase = null;
+  await saveTask(ctx.flooDir, ctx.mainTask);
+  ctx.batch.status = 'completed';
+  await saveBatch(ctx.flooDir, ctx.batch);
+  await notify(ctx.flooDir, 'task_completed',
+    { batch_id: ctx.batchId, task_id: ctx.mainTask.id, status: 'completed', phase: null });
+  await notify(ctx.flooDir, 'batch_completed',
+    { batch_id: ctx.batchId, task_id: ctx.mainTask.id, status: 'completed', total_tasks: 1, completed: 1, failed: 0 });
+  return { batch: ctx.batch, tasks: [ctx.mainTask] };
 }
 
 // ============================================================
