@@ -14,6 +14,7 @@ import { readExitArtifact, waitForCompletion } from './adapters/base.js';
 import { findOutOfScope, ensureFlooDir, detectConflicts } from './scope.js';
 import { notify } from './notifications.js';
 import { extractLesson } from './lessons.js';
+import { synthesizeInitialPlan, writePlan } from './plan.js';
 import type {
   Task,
   Batch,
@@ -1408,6 +1409,18 @@ export async function createAndRun(
     depends_on: [],
   };
   await saveTask(flooDir, mainTask);
+
+  // Step 1 镜像 plan：在 dispatcher 真正执行前落一份开局快照,
+  // 内容反映 startPhase + 角色配置推断的执行图。dispatcher 不消费这份文件,
+  // 它只是给后续 Step 4 executor 和 UI 提供 ledger 锚点。
+  // planner 拆 task 之后 task.json 才是真实状态源,plan.yaml 不更新。
+  // 落盘失败不阻塞主流程(plan.yaml 是镜像,不是关键路径)
+  try {
+    const initialPlan = synthesizeInitialPlan({ batch, task: mainTask, startPhase, config });
+    await writePlan(flooDir, initialPlan);
+  } catch (err) {
+    await log(flooDir, 'plan-mirror-write-failed', { batch: batchId, error: String(err) });
+  }
 
   await notify(flooDir, 'task_started', { batch_id: batchId, task_id: mainTask.id, description });
 
