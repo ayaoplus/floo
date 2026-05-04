@@ -4,7 +4,9 @@
 >
 > 重构路径:[docs/refactor-plan.md](./refactor-plan.md)
 
-本文档记录已完成的 milestones(M1-M3 已交付,M4 进行中)。**M5 / M6 原计划已被新架构吸收,具体执行步骤迁移至 [refactor-plan.md](./refactor-plan.md)**,本文档不再作为新功能的 roadmap,只保留历史。
+本文档记录已完成的 milestones(M1-M4 已交付)。**M5 / M6 原计划已被新架构吸收,具体执行步骤迁移至 [refactor-plan.md](./refactor-plan.md)**,本文档不再作为新功能的 roadmap,只保留历史。
+
+> 注:dev-plan 的 M4 = "Web UI"(Done)。refactor-plan 的 Step 4 = "Executor 替换 Dispatcher"(子步 4a-4c Done,4d/4e Pending),**两个 4 不是同一件事**。
 
 ## Completed Milestones
 

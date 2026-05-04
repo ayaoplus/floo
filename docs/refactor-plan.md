@@ -30,6 +30,233 @@
 
 ---
 
+## 架构与数据流图
+
+本节用于把重构主线的关键结构可视化。所有图都是 Mermaid 源码,与本文档一起维护;当 Step 4d/4e/5/6/7/8 的实际落地方式变化时,优先同步这些图,再同步下方逐步计划。
+
+### 1. 重构路线总览
+
+```mermaid
+flowchart TD
+  S0["固定 6 阶段状态机<br/>dispatcher + PHASE_ORDER"]
+  S1["Step 1<br/>plan.yaml 只读镜像"]
+  S2["Step 2<br/>templates/plans + loadTemplate"]
+  S3["Step 3<br/>skills frontmatter 成为 capability 元数据源"]
+  S4a["Step 4a<br/>executor facade + runPlan API"]
+  S4b["Step 4b<br/>dispatcher thin shim + executor 子模块"]
+  S4c["Step 4c<br/>PlanState 驱动 simple path"]
+  S4d["Step 4d<br/>complex path 消费 plan loop/defer"]
+  S4e["Step 4e<br/>PHASE_ORDER 从 feature.yaml 派生"]
+  S5["Step 5<br/>runtimes 进 config + GenericRuntimeAdapter"]
+  S6["Step 6<br/>plan-patch 追加 DAG 节点"]
+  S7["Step 7<br/>UI 围绕 plan DAG + runs 展示"]
+  S8["Step 8<br/>--orchestrate 生成 plan"]
+  Target["目标态<br/>plan.yaml 是执行唯一事实源"]
+
+  S0 --> S1 --> S2 --> S3 --> S4a --> S4b --> S4c --> S4d --> S4e --> S5 --> S6 --> S7 --> S8 --> Target
+
+  classDef done fill:#dff7e8,stroke:#2f8f5b,color:#123;
+  classDef pending fill:#fff5d6,stroke:#c49000,color:#123;
+  classDef target fill:#e6f0ff,stroke:#3f65b7,color:#123;
+  class S1,S2,S3,S4a,S4b,S4c done;
+  class S4d,S4e,S5,S6,S7,S8 pending;
+  class Target target;
+```
+
+### 2. 过渡期控制面与目标控制面
+
+```mermaid
+flowchart LR
+  subgraph Current["当前过渡期"]
+    CRun["floo run"]
+    CRouter["routeTask / --mode"]
+    CBatch["createAndRun"]
+    CWheel["硬编码 discuss-designer 飞轮"]
+    CState["RunState / runTaskFromSteps<br/>simple path only"]
+    CMirror["plan.yaml 镜像<br/>complex path 不消费"]
+
+    CRun --> CRouter --> CBatch
+    CBatch --> CWheel
+    CBatch --> CState
+    CBatch --> CMirror
+  end
+
+  subgraph Target["目标态"]
+    TRun["floo run"]
+    TTemplate["template / orchestrator"]
+    TPlan["plan.yaml<br/>唯一事实源"]
+    TExec["DAG executor"]
+    TPolicy["write_policy / outputs 校验"]
+    TLedger["runs / artifacts / notifications ledger"]
+
+    TRun --> TTemplate --> TPlan --> TExec
+    TExec --> TPolicy --> TLedger
+    TExec --> TLedger
+  end
+
+  CMirror -. "Step 4d/4e 后收敛为" .-> TPlan
+```
+
+### 3. 目标运行时架构
+
+```mermaid
+flowchart TB
+  User["User / Agent<br/>CLI 调用 floo"]
+  CLI["src/commands/run.ts<br/>参数解析 + config 加载"]
+  Router["router<br/>选择模板或 orchestrator"]
+  Templates["templates/plans/*.yaml<br/>tiny / quick / feature"]
+  Orchestrator["skills/orchestrator.md<br/>高级模式生成 plan"]
+  Plan[".floo/batches/&lt;id&gt;/plan.yaml<br/>Batch Plan DAG"]
+  Registry["Capability Registry<br/>skills/*.md frontmatter"]
+  Executor["src/core/executor.ts<br/>DAG 拓扑调度"]
+  RuntimeRegistry["floo.config.json runtimes<br/>runtime CLI 注册表"]
+  Adapter["GenericRuntimeAdapter<br/>tmux + CLI runner"]
+  Agent["Claude / Codex / Gemini / custom CLI"]
+  Policy["Policy Check<br/>scope / artifacts_only / readonly"]
+  Ledger["Run Ledger<br/>runs, logs, artifacts, notifications"]
+  Web["Web UI<br/>graph + run detail"]
+
+  User --> CLI --> Router
+  Router --> Templates --> Plan
+  Router --> Orchestrator --> Plan
+  Registry --> Executor
+  Plan --> Executor
+  Executor --> RuntimeRegistry --> Adapter --> Agent
+  Agent --> Ledger
+  Executor --> Policy --> Ledger
+  Ledger --> Web
+  Plan --> Web
+```
+
+### 4. `floo run` 数据流
+
+```mermaid
+sequenceDiagram
+  autonumber
+  actor U as User
+  participant CLI as floo run
+  participant Router as Router
+  participant Plan as plan.yaml
+  participant Exec as Executor
+  participant Adapter as Runtime Adapter
+  participant Agent as Worker Agent
+  participant Ledger as .floo Ledger
+  participant UI as Web UI
+
+  U->>CLI: floo run "task" --mode quick
+  CLI->>Router: description + scope + mode
+  Router->>CLI: template name + start context
+  CLI->>Plan: write batch plan DAG
+  CLI->>Exec: run(plan)
+  Exec->>Ledger: create batch/task state
+  loop ready steps by depends_on
+    Exec->>Adapter: spawn(step runtime, prompt, scope)
+    Adapter->>Agent: tmux session + runner
+    Agent-->>Ledger: artifacts / commits / exit signal
+    Adapter-->>Exec: wait-for completion
+    Exec->>Exec: validate outputs + write_policy
+    Exec->>Ledger: run record + notifications
+  end
+  UI->>Ledger: read batches, plan, runs, logs
+  UI-->>U: graph + run detail
+```
+
+### 5. 单个 step 生命周期
+
+```mermaid
+stateDiagram-v2
+  [*] --> Pending
+  Pending --> Ready: all depends_on completed
+  Ready --> Running: executor spawns runtime
+  Running --> Retry: nonzero exit and attempts < MAX_RETRIES
+  Retry --> Running: prompt includes previous_error
+  Running --> PolicyCheck: exit_code = 0
+  PolicyCheck --> Completed: outputs valid and write_policy pass
+  PolicyCheck --> Failed: missing outputs or policy violation
+  Running --> Cancelled: floo cancel or AbortSignal
+  Running --> Failed: retries exhausted
+  Completed --> [*]
+  Failed --> [*]
+  Cancelled --> [*]
+```
+
+### 6. `feature.yaml` DAG 与过渡期循环语义
+
+```mermaid
+flowchart TD
+  D["discuss<br/>context.md"]
+  G["designer<br/>design.md or design-questions.md"]
+  P["planner<br/>plan.md"]
+  C["coder<br/>commits"]
+  R["reviewer<br/>review.md"]
+  T["tester<br/>test-report.md"]
+
+  D --> G --> P --> C --> R --> T
+  G -. "blocker questions<br/>loop_with: designer" .-> D
+  R -. "verdict: fail<br/>loop_with: implement" .-> C
+  T -. "result: fail<br/>loop_with: implement" .-> C
+
+  P -. "defer_after: planner<br/>planner 拆 task 后展开" .-> C
+```
+
+### 7. Plan-patch 追加节点模型
+
+```mermaid
+flowchart LR
+  subgraph Before["初始 plan.yaml"]
+    A["implement-1<br/>coder"]
+    B["review-1<br/>reviewer"]
+    A --> B
+  end
+
+  B --> V{"review verdict"}
+  V -->|"pass"| Done["step completed"]
+  V -->|"fail"| Patch["patches/review-1.yaml<br/>append nodes only"]
+
+  subgraph After["应用 patch 后的 plan.yaml"]
+    A2["implement-1<br/>coder"]
+    B2["review-1<br/>reviewer"]
+    C2["implement-2<br/>coder"]
+    D2["review-2<br/>reviewer"]
+    A2 --> B2 --> C2 --> D2
+  end
+
+  Patch --> C2
+```
+
+### 8. Web UI 读模型
+
+```mermaid
+flowchart TB
+  FlooDir[".floo/"]
+  PlanFile["batches/&lt;id&gt;/plan.yaml"]
+  BatchJson["batches/&lt;id&gt;/batch.json"]
+  TaskJson["tasks/&lt;taskId&gt;/task.json<br/>过渡期兼容"]
+  Runs["tasks/&lt;taskId&gt;/runs/*.json"]
+  Logs["tasks/&lt;taskId&gt;/logs/*.log"]
+  Artifacts["tasks/&lt;taskId&gt;/*.md"]
+  Notifications["notifications/*.json"]
+
+  DataLayer["web/lib/floo.ts<br/>read-only data access"]
+  BatchPage["Batch DAG page<br/>nodes + edges"]
+  RunPage["Run detail page<br/>prompt/log/artifact/diff"]
+  HealthPage["Health / sessions"]
+
+  FlooDir --> PlanFile --> DataLayer
+  FlooDir --> BatchJson --> DataLayer
+  FlooDir --> TaskJson --> DataLayer
+  FlooDir --> Runs --> DataLayer
+  FlooDir --> Logs --> DataLayer
+  FlooDir --> Artifacts --> DataLayer
+  FlooDir --> Notifications --> DataLayer
+
+  DataLayer --> BatchPage
+  DataLayer --> RunPage
+  DataLayer --> HealthPage
+```
+
+---
+
 ## Step 1: plan.yaml 落盘 (只读模式)
 
 ### 目标
@@ -173,11 +400,22 @@
 
 ## Step 4: Executor 替换 Dispatcher (核心一步)
 
+> **当前进度(2026-05)**:Step 4 拆成 4a/4b/4c/4d/4e 五个子步,**4a/4b/4c 已 Done**,**4d/4e 仍 Pending**。
+>
+> 已落地:executor facade 上线、dispatcher 1661→18 行 thin shim、tiny/quick/feature 模板、`floo run --mode`、PlanState 驱动 simple path(coder/reviewer/tester 起步)。
+>
+> 仍未落地(=尚未"模板驱动行为变化"的范围):
+> - **Complex path**:`createAndRun` 在 discuss/designer/planner 起步上仍走 dispatcher 时代的硬编码飞轮(`executor/batch.ts:191-196` 注释明示),不消费 plan.steps
+> - **`runPlan(plan, opts)`**:当 `plan.mode === 'executor'` 时仍抛 unsupported(`src/core/executor.ts:62`)
+> - **`PHASE_ORDER`**:仍是 types.ts 里的硬编码常量,未从 feature.yaml 派生
+>
+> 因此当前 `floo run` 不带 `--mode` 走 6 阶段流程时,plan.yaml 仍然只是状态机的镜像快照,不影响行为。下面"目标"段落描述的是 Step 4 全部子步落地后的最终状态,不是当前现状。
+
 ### 目标
 
 新写一个 `src/core/executor.ts`,以 plan.yaml 为唯一输入驱动调度。`dispatcher.ts` 退化为 compatibility shim,内部委托 executor。frontmatter 中的 `write_policy` / `outputs` 由 executor 在 step 完成后强制校验(事后检测,见 design.md 中 write_policy 章节)。
 
-**这一步首次承诺"模板驱动行为变化"**。具体涵盖:
+**这一步首次承诺"模板驱动行为变化"**(注:complex path 部分要等 4d 落地)。具体涵盖:
 
 1. dispatcher 中 `:1438` 的 coder 短路、`:1499` 的 discuss/designer 飞轮等硬编码分支,**全部翻译成 plan.yaml 节点 + depends_on**。短路 = router 生成更短的 plan;飞轮 = 通过 plan-patch (Step 6) 表达,但 Step 4 阶段先用 executor 内置的"feature.yaml 等价模式"承接(见下方"飞轮的过渡处理")
 2. `tiny.yaml` / `quick.yaml` 模板加入 `templates/plans/`,并由 router 根据任务关键词或 `--mode` 选用
