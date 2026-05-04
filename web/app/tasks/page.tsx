@@ -104,6 +104,12 @@ export default async function TasksPage({ searchParams }: PageProps) {
                   {batch.id}
                 </h2>
                 <StatusBadge status={batch.status} />
+                <Link
+                  href={`/batches/${batch.id}`}
+                  className="text-xs text-olive-gray hover:text-near-black underline-offset-2 hover:underline"
+                >
+                  View DAG →
+                </Link>
                 <span className="text-xs text-stone-gray ml-auto">
                   {formatRelative(batch.created_at)}
                 </span>

@@ -574,6 +574,23 @@ flowchart TB
 
 ## Step 7: UI 改造 (graph + runs)
 
+> **当前进度(2026-05)**:✅ Done(数据层 + DAG 可视化 + patch 时间线已落地)。
+>
+> 已落地:
+> - `web/lib/plan.ts`:`getBatchPlan` / `getBatchPatches` + `layoutDag` 拓扑分层布局,纯函数无 DOM 依赖
+> - `GET /api/batches/[batchId]/plan`:返回 plan + patches + dag 布局结果
+> - `web/app/batches/[batchId]/page.tsx`:Server Component 渲染 SVG DAG(节点矩形 + cubic-bezier 边)+ patch 演化时间线 + plan metadata + notes
+> - 节点视觉:`appended_by_patch` 红边框 + 红点;`status=deferred` 虚线边框 + "defer" 标记;节点点击跳到 task 详情
+> - 入口:tasks 列表每个 batch 标题旁加 "View DAG →"、task 详情页右侧 panel 加 "Plan DAG" 卡片链接
+> - AutoRefresh 5s 复用,实时跟随 plan 演化
+>
+> **设计决策**:用纯 SVG 自己布局,不引入 react-flow(200KB+ 依赖)。floo 单人本机工具,DAG 通常 < 20 节点 < 6 层,自己画维护成本更低。
+>
+> **未做**(留给 Step 8 或后续):
+> - **Step → Run 精确映射**:plan.yaml 是 step 级,RunRecord 是 phase 级;Step 7 把所有节点链到 initial_task,不做 step ↔ run 一一映射(planner 拆 task 后 plan 不更新,精确映射意义有限)
+> - **节点单独的 prompt / log / diff 子页面**:复用现有 task 详情页的 phase-level 视图(prompt 是 phase 级的,task 详情页已有)
+> - **mutation**(retry / 取消已有 cancel):refactor-plan 已声明只读优先
+
 ### 目标
 
 Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log / artifact / diff)。
@@ -667,5 +684,5 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 | 4e. PHASE_ORDER 从 feature.yaml 派生(消除硬编码常量) | ✅ Done | 新模块 `src/core/phase-order.ts` 启动期同步读 `templates/plans/feature.yaml` 派生;types.ts 改为 re-export 维持 import 兼容;读取/解析失败时 fallback 硬编码 + console.warn |
 | 5. Runtimes 进 config | ✅ Done | `floo.config.json#runtimes` 注册 CLI 命令模板;`GenericRuntimeAdapter` 配置驱动;`ClaudeAdapter` / `CodexAdapter` 退化为 GenericRuntimeAdapter 的 preset;commands/run.ts、cancel.ts 切到 `loadAdapters(config)`;`Runtime` 类型从封闭联合放开为 `'claude' \| 'codex' \| (string & {})` |
 | 6. Plan-patch | ✅ Done | `src/core/plan-patch.ts` 提供 `PlanPatch` schema + `applyPatch` + IO;`emitRetryPatch` 在 reviewer/tester fail retry 时落 patch + 演化 plan.yaml(双轨道:RunState 仍走 rollbackToPhase 执行,plan 是 ledger)。discuss-designer 飞轮、worker-output-patch、并发串行化留给后续 |
-| 7. UI 改造 | ⬜ Pending | |
+| 7. UI 改造 | ✅ Done | `/batches/[batchId]` 页面 SVG DAG(layoutDag 拓扑分层 + cubic-bezier 边)+ patch 时间线 + plan metadata;`web/lib/plan.ts` 数据层独立读 yaml;tasks 列表/详情页加 "View DAG" 入口。step↔run 精确映射、节点子页面留给后续 |
 | 8. --orchestrate | ⬜ Pending | opt-in 高级模式 |

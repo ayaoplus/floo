@@ -145,6 +145,14 @@ export default async function TaskDetailPage({
         {/* 右侧：元信息面板 */}
         <aside className="space-y-4">
           <MetaCard label="Batch" value={task.batch_id} mono />
+          {/* Step 7:跳到 batch DAG 视图 */}
+          <Link
+            href={`/batches/${task.batch_id}`}
+            className="block bg-ivory rounded-xl border border-border-cream p-4 hover:bg-warm-cream transition-colors"
+          >
+            <h4 className="text-xs text-stone-gray mb-1">Plan DAG</h4>
+            <span className="text-sm text-near-black">View execution graph →</span>
+          </Link>
           <MetaCard label="Review Level" value={task.review_level} />
           <MetaCard label="Created" value={formatRelative(task.created_at)} />
           <MetaCard label="Updated" value={formatRelative(task.updated_at)} />
