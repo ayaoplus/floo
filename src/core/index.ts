@@ -19,7 +19,17 @@ export {
 } from './scope.js';
 
 // Skill 模板加载
-export { loadSkill, renderTemplate, extractVariables } from './skills/loader.js';
+// Step 3 新增:loadSkillWithMetadata / parseSkillFile / validateCapabilityMetadata 暴露 frontmatter
+export {
+  loadSkill,
+  loadSkillWithMetadata,
+  parseSkillFile,
+  validateCapabilityMetadata,
+  renderTemplate,
+  extractVariables,
+  type SkillFile,
+  type TemplateVars,
+} from './skills/loader.js';
 
 // Adapter 实现
 export { ClaudeAdapter } from './adapters/claude.js';

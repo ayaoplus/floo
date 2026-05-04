@@ -1,3 +1,15 @@
+---
+name: coder
+write_policy: scope
+outputs:
+  - commits
+default_runtime: claude
+default_model: sonnet
+inputs:
+  - design.md
+  - plan.md
+---
+
 # Coder — 代码实现
 
 你是 Coder 角色。你的职责是根据任务描述和设计方案写代码，以原子 commit 交付。

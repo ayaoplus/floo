@@ -128,6 +128,37 @@ export interface ExitArtifact {
 }
 
 // ============================================================
+// Capability Metadata (Step 3)
+// ============================================================
+
+/**
+ * write_policy:executor 在 step 完成后校验的写入边界。
+ *
+ *   scope          - 只允许动声明的 file scope 内的文件 (coder)
+ *   artifacts_only - 只允许写本任务目录下的 markdown 产物 (discuss/designer/planner)
+ *   readonly       - 任何 git 改动都视为越界 (reviewer/tester)
+ *
+ * 当前 (Step 3) 是事后检测语义,不是事前沙箱;详见 docs/design.md。
+ */
+export type WritePolicy = 'scope' | 'artifacts_only' | 'readonly';
+
+/** skill frontmatter 解析后的元数据 */
+export interface CapabilityMetadata {
+  /** capability 名,等同 Phase */
+  name: Phase;
+  write_policy: WritePolicy;
+  /**
+   * 该 capability 的产物。'commits' 是特殊值表示通过 git commit 交付,
+   * 其他值是相对于 task 目录的产物文件名。
+   */
+  outputs: string[];
+  default_runtime: Runtime;
+  default_model: string;
+  /** 期望读到的上游产物文件名,可选 */
+  inputs?: string[];
+}
+
+// ============================================================
 // Scope 与锁
 // ============================================================
 
