@@ -1,677 +1,379 @@
-# Floo: Multi-Agent Vibe Coding Harness
+# Floo Architecture
 
-## Context
+> 状态:本文档描述目标架构。当前实现仍处于过渡期(固定 6 阶段管线),按 [refactor-plan.md](./refactor-plan.md) 的步骤逐步演进到目标态。文档中的"目标态 / 过渡期"标签会标注差异。
 
-当前 AI coding agent（Claude Code、Codex、OpenClaw）各自独立运行，缺乏协同。个人开发者需要一个轻量的编排层来实现：多 agent 并行开发、交叉 review、任务追踪、失败重试、经验积累。
+Floo 是一个面向**单人多 agent 协同**的本机 harness。它本身不实现编码引擎,而是把多个 AI coding 工具(Claude Code、Codex,以及未来可能加入的 Gemini、OpenClaw、opencode 等)启动在 tmux 中,按一份**显式的执行图(plan)**调度它们,并把所有产物落到 `.floo/` 下供观测和恢复。
 
-参考了 5 个项目/文章后的核心判断：
-- **Superpowers**：skill 模板 + 质量门禁 → 借鉴 skill 模板和设计检查清单
-- **gstack**：全流程软件工厂 → 太重，但 review 置信度分级、QA 分类体系值得提炼
-- **OMX**：异构 agent 编排 → 架构思路最接近，但 TS+Rust 双栈太复杂
-- **Elvis/OpenClaw**：task JSON + worktree + tmux + cron 监控 → 实用模式，直接采用
-- **Peter/Moltbot**：反框架，原子提交，对话式开发 → 哲学上最对，避免过度工程化
+## 设计哲学
 
-**设计原则：Elvis 的实用工具 + Peter 的极简哲学。做调度器，不做引擎。**
+- **简单 > 完备**:这是个人工具,不是企业平台。能用 30 行代码解决的不写 300 行,能写在配置里的不写在代码里。
+- **harness 能力依靠 prompt 和整体设计,而不是具体实现**:每个 capability 的行为定义在 `skills/*.md`,Floo 核心不引入 LLM SDK,只负责调度和数据流。
+- **流程不写死**:执行流程是一份 plan 的产物,而不是代码里的状态机。改流程 = 改一份 yaml,不改 TS。
+- **兼容性强**:加一个新 runtime / 新 capability,不需要改框架代码,只需要加一份配置 / 一份 prompt 模板。
+- **dispatcher,not engine**:Floo 协调生命周期、状态、重试、产物。Agent 负责推理和写代码。
+- **files over services**:`.floo/` 就是运行时数据库,无后台守护进程,无外部 DB。
+- **event-driven completion**:`tmux wait-for` 是内部回调,文件通知是观测者的副产物。
+- **scope-first parallelism**:由 plan 声明的 file scope 决定哪些节点可以并行。
 
+## 目标架构:5 个核心抽象
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  Skill Metadata        │  skills/*.md frontmatter            │
+│  Runtime Config        │  floo.config.json.runtimes          │
+│  Plan Templates        │  templates/plans/*.yaml             │
+│  Batch Plan            │  .floo/batches/<id>/plan.yaml       │
+│  DAG Executor + Ledger │  src/core/executor.ts + .floo/...   │
+└──────────────────────────────────────────────────────────────┘
+```
+
+### 1. Skill Metadata (capability 注册中心)
+
+`skills/*.md` 既是 prompt 模板,也是 capability 定义。frontmatter 描述这个 capability 的契约:
+
+```markdown
+---
+name: coder
+write_policy: scope          # scope | artifacts_only | readonly
+outputs: [commits]           # commits | artifact filenames
+default_runtime: claude
+default_model: sonnet
+inputs:                      # 这个 capability 期望读到的上游产物
+  - context.md
+  - design.md
+  - plan.md
 ---
 
-## 一、架构概览
-
-### 系统三层架构
-
-![系统三层架构](./img/arch-overview.png)
-
-Floo 本身是**无头的编排层**，不绑定任何交互方式。谁调用 CLI 谁就是交互层。
-可以是 Telegram 上的 OpenClaw，也可以是本地终端的 Claude Code。
-
-### 目录结构
-
-```
-floo/
-├── package.json                      # TypeScript monorepo (npm workspaces)
-├── packages/
-│   ├── core/                         # 编排核心
-│   │   └── src/
-│   │       ├── types.ts              # 所有类型定义
-│   │       ├── dispatcher.ts         # 调度器（核心：状态机 + on-complete + dispatch）
-│   │       ├── adapters/
-│   │       │   ├── base.ts           # AgentAdapter 基类 + tmux 操作 + floo-runner
-│   │       │   ├── claude.ts         # Claude Code adapter
-│   │       │   └── codex.ts          # Codex adapter
-│   │       ├── skills/
-│   │       │   └── loader.ts         # 加载 markdown skill 模板
-│   │       ├── monitor.ts            # 状态监控（批次/任务查询、取消、超时检测）
-│   │       ├── router.ts             # 任务自动路由（判断从哪个阶段开始）
-│   │       ├── scope.ts              # scope 冲突检测 + commit 锁
-│   │       ├── notifications.ts      # 通知文件输出（.floo/notifications/）
-│   │       ├── health.ts             # 健康检查（孤儿 session、stale task、日志轮转）
-│   │       └── lessons.ts            # 经验积累（lesson 记录、提取、规则提炼）
-│   ├── cli/                          # CLI 入口
-│   │   └── src/
-│   │       ├── index.ts
-│   │       └── commands/
-│   │           ├── run.ts            # floo run "task description"
-│   │           ├── status.ts         # floo status
-│   │           ├── monitor.ts        # floo monitor (持续监控)
-│   │           ├── cancel.ts         # floo cancel <taskId>
-│   │           ├── learn.ts          # floo learn "经验描述"
-│   │           ├── sync.ts           # floo sync (配置同步)
-│   │           └── init.ts           # floo init
-│   └── web/                          # 监控面板（M4 实现，当前占位）
-├── skills/                           # 默认 skill 模板（精心调试，核心竞争力）
-│   ├── designer.md
-│   ├── planner.md
-│   ├── coder.md
-│   ├── reviewer.md
-│   └── tester.md
-└── templates/                        # 初始化模板
-    └── post-commit.sh                # git post-commit hook（编译门禁）
+(prompt body...)
 ```
 
----
+`write_policy` 由 executor 在运行时强制执行:
+- `scope`:只能写声明的 file scope 内的文件,会跑 git wrapper 拦截 out-of-scope 写入
+- `artifacts_only`:只能写本任务目录下的 markdown 产物(context.md / design.md / plan.md 等)
+- `readonly`:只能读,任何 git 改动会被拒绝
 
-## 二、核心概念
+**capability 注册中心 = `ls skills/`**。新增一个 capability = 加一份 `skills/<name>.md`。不需要再维护一份 `capabilities.yaml`(避免双事实源)。
 
-### 1. 六个角色
+当前内置 capabilities:
 
-| 角色 | 职责 | 输入 | 输出 | 权限 |
-|------|------|------|------|------|
-| **Designer** | 需求分析 + 设计方案 + 定义 scope | 用户原始需求 | design.md（自由 markdown）| 可写: design.md |
-| **Planner** | 任务拆分与编排 | design.md + 代码库结构 | plan.md（严格 YAML 格式）| 可写: plan.md |
-| **Coder** | 写代码，原子提交 | 单个任务 + design.md | commit(s) | 可写: scope 内的代码文件 |
-| **Reviewer** | 代码审查（只读不改）| diff + design.md + 验收标准 | review.md（verdict: pass/fail）| 只读代码，可写: review.md |
-| **Tester** | E2E 测试与集成测试 | 代码变更 + 需求 | test-report.md（result: pass/fail）| 只读代码，可写: test-report.md |
-| **house-elf** | 系统运维（清洁工）| 事件触发 | lesson / 配置更新 / 清理 | 可写: .floo/ 下的系统文件 |
+| capability | write_policy | outputs | 用途 |
+|---|---|---|---|
+| discuss | artifacts_only | context.md | 需求澄清(详见 [discuss-design.md](./discuss-design.md)) |
+| designer | artifacts_only | design.md, design-questions.md | 技术设计 |
+| planner | artifacts_only | plan.md | 拆解任务为可执行单元 |
+| coder | scope | commits | 实施一个任务并提交 |
+| reviewer | readonly | review.md | 评审 diff |
+| tester | readonly | test-report.md | 验证与回归 |
 
-前五个处理业务任务，house-elf 处理系统自身维护。
+### 2. Runtime Config (runtime 注册中心)
 
-### 2. 角色绑定（三层配置）
+`floo.config.json` 增加 `runtimes` 段,登记本机可用的 agent CLI:
 
-**优先级：任务级 > 项目级 > 系统默认**
-
-系统默认绑定：
-```yaml
-roles:
-  designer:  { runtime: claude, model: sonnet }
-  planner:   { runtime: claude, model: sonnet }
-  coder:     { runtime: claude, model: sonnet }
-  reviewer:  { runtime: codex,  model: codex-mini }  # 默认交叉审核
-  tester:    { runtime: claude, model: sonnet }
-```
-
-项目级覆盖：`floo.config.json` 中配置
-任务级覆盖：Planner 编排时动态指定，或用户显式指定
-
-**交叉审核规则**：Reviewer 默认使用与 Coder 不同的 runtime（建议，非强制）
-
-### 3. 批次（Batch）
-
-任务按批次组织，批次之间隔离：
-
-```
-.floo/batches/
-├── 2026-04-07-auth-refactor/
-│   ├── batch.json              # 批次元数据
-│   ├── tasks/
-│   │   ├── task-001/
-│   │   │   ├── task.json       # 任务元数据（状态、scope、runtime）
-│   │   │   ├── design.md
-│   │   │   ├── plan.md
-│   │   │   ├── review.md
-│   │   │   ├── test-report.md
-│   │   │   └── runs/
-│   │   │       ├── 001-designer.json
-│   │   │       └── 002-coder.json
-│   │   └── task-002/
-│   └── summary.md              # 整体 review 报告
-```
-
-批次完整生命周期：
-
-![批次完整生命周期](./img/batch-lifecycle.png)
-
----
-
-## 三、执行模式
-
-### 1. tmux session（一个 agent 一个 session）
-
-每个任务的每个 phase 绑定一个 tmux session，session 是 agent 的生命周期容器。
-
-启动：
-```bash
-tmux new-session -d -s "floo-{taskId}-{phase}" \
-  "floo-runner {taskId} {phase} {runtime} '{prompt}'"
-```
-
-### 2. floo-runner（agent 生命周期包装器）
-
-每个 agent 进程都由 `floo-runner` 包装，负责四件事：
-
-1. **启动 agent 进程**，捕获退出码
-2. **force-commit 兜底**：agent 退出后检查 `git status --porcelain`，scope 内有未提交变更则自动 `git add + commit`，防止 agent 写了代码忘提交
-3. **写 exit artifact**：`.floo/signals/{taskId}-{phase}.exit`（退出码 + 产物清单 + 时间戳 + git diff summary）
-4. **发 tmux wait-for 信号**：`tmux wait-for -S floo-{taskId}-{phase}-done`
-
-```bash
-# floo-runner 伪代码
-run_agent "$runtime" "$model" "$prompt"
-EXIT_CODE=$?
-force_commit_if_dirty "$SCOPE"    # 兜底：未提交的 scope 内变更自动 commit
-write_exit_artifact "$TASK_ID" "$PHASE" "$EXIT_CODE"
-tmux wait-for -S "floo-${TASK_ID}-${PHASE}-done"
-```
-
-这保证了 dispatcher 收到信号时，exit artifact 已经落盘，可以直接读取判据。
-
-### 3. 回调机制
-
-**核心用 `tmux wait-for` 做 agent 完成回调（零延迟），等价于 agent-swarm 的 `on-complete.sh`。**
-
-![Floo 事件驱动回调机制](./img/callback-mechanism.png)
-
-完整链路：
-
-```
-调用方 Agent → floo run "task" (阻塞等待)
-  → Dispatcher: createAndRun()
-    → adapter.spawn() → tmux new-session → Runner 脚本启动工作 Agent
-      → Agent 自主编码 + git commit (post-commit hook 编译门禁)
-      → Agent 退出
-    → Runner: force-commit 兜底 → 收集 files_changed → 写 exit artifact
-    → tmux wait-for 信号 ★ 零延迟事件回调（不是轮询）
-  → Dispatcher 读 exit artifact → 状态机推进 → dispatch 下一个 phase
-  → 所有 phase 完成 → 返回 { batch, tasks }
-→ CLI exit code + stdout ★ 同步模式下 CLI 本身就是回调
-```
-
-**两层回调**：
-- **内部回调**：`tmux wait-for` — dispatcher 在 agent 退出的瞬间被唤醒，零延迟推进状态机
-- **外部回调**：CLI exit — 调用方 agent（CC/Codex/OpenClaw）同步等待 CLI 完成，exit code 就是结果
-
-**不需要轮询，不需要 webhook。** 通知文件（`.floo/notifications/`）是给外部观察者（monitor/Telegram bot）用的补充机制。
-
-### 4. tmux session 生命周期
-
-```yaml
-session_lifecycle:
-  on_success: keep 30min, then cleanup
-  on_failure: keep 24h, then cleanup
-  orphan_check: every 10min       # house-elf 负责
-  timeout: 30min                  # 可配置
-  timeout_handling: house-elf 检查内部活动，有交互不杀，长时间无响应才处理
-  naming: "floo-{taskId}-{phase}" # 如 floo-T004-coder
-```
-
-### 5. Agent Adapter 接口
-
-```typescript
-interface AgentAdapter {
-  runtime: 'claude' | 'codex';
-
-  /** 启动 agent（通过 floo-runner 包装），返回 tmux session 名 */
-  spawn(opts: SpawnOptions): Promise<string>;
-
-  /** 检查 session 是否还活着 */
-  isAlive(sessionName: string): Promise<boolean>;
-
-  /** 获取 session 输出（最后 N 行） */
-  getOutput(sessionName: string, lines?: number): Promise<string>;
-
-  /** 向运行中的 session 发送消息 */
-  sendMessage(sessionName: string, msg: string): Promise<void>;
-
-  /** 强制终止 session 并写入 exit artifact */
-  kill(sessionName: string, cwd: string, taskId: string, phase: string): Promise<void>;
-}
-
-interface SpawnOptions {
-  taskId: string;
-  phase: Phase;
-  prompt: string;
-  cwd: string;
-  runtime: Runtime;
-  model: string;
-  commitLock?: boolean;   // 启用 git 写操作序列化
-  scope?: string[];       // 任务允许修改的文件/目录列表
+```json
+{
+  "runtimes": {
+    "claude": {
+      "command": "claude",
+      "args": ["--dangerously-skip-permissions", "--print"],
+      "models": ["sonnet", "opus", "haiku"],
+      "default_model": "sonnet"
+    },
+    "codex": {
+      "command": "codex",
+      "args": ["exec", "--model", "{model}"],
+      "models": ["gpt-5.2", "gpt-5.3-codex"],
+      "default_model": "gpt-5.2"
+    }
+  }
 }
 ```
 
----
+新接 Gemini / OpenClaw / opencode = 加一段配置。Adapter 层退化为"按配置启动 tmux,捕获 stdout/stderr"的通用执行器,不再为每种 runtime 单独写 TypeScript 类。
 
-## 四、调度逻辑
+> **过渡期备注**:当前 `src/core/adapters/{claude,codex}.ts` 仍是硬编码类。重构会保留它们作为 fallback,直到通用 runtime adapter 验证稳定。
 
-### 1. 隔离策略：主分支 + scope 锁
+### 3. Plan Templates (静态默认流程)
 
-![并行调度与 Scope 隔离](./img/parallel-scheduling.png)
+`templates/plans/*.yaml` 内置几份执行图,按任务类型选择:
 
-不使用 worktree。所有 agent 在主分支上工作，通过 scope（文件列表）避免冲突。
-
-- **Milestone 1 强约束**：`floo run` 启动前检查 `git status --porcelain`，working tree 不干净则拒绝启动；单任务独占仓库
-- **Planner 定义每个任务的 scope**（要改哪些文件）
-- scope 无交集的任务可以并行
-- scope 有交集的任务必须串行
-- **commit 锁**：序列化 commit 操作（lockfile），避免并发 git add/commit 冲突
-
-### 2. scope 越界处理
-
-Coder 完成后检查 `git diff --name-only` vs scope：
-- 越界文件与其他 running task 无冲突 → 接受，更新 scope 记录
-- 越界文件有冲突 → 整个任务回退重新编排
-
-### 3. 调度实现：状态机 80% + agent 20%
-
-![任务状态机](./img/task-state-machine.png)
-
-**正常流转（状态机，JS 硬编码）：**
 ```
-Designer 完成 → 触发 Planner
-Planner 完成  → 解析 plan.md（YAML），提取任务列表和 scope，判断并行/串行，dispatch Coder(s)
-Coder 完成    → dispatch Reviewer（不同 runtime）
-Reviewer pass → dispatch Tester
-Tester pass   → 标记完成
-所有任务完成  → 触发整体 Review → 报告给用户
+templates/plans/
+├── tiny.yaml         # 仅 coder, 用于一行 typo / 文案
+├── quick.yaml        # coder → reviewer (跨 runtime), 小修复
+├── feature.yaml      # discuss → designer → planner → coder → reviewer → tester (= 当前默认 6 阶段)
+├── cross-review.yaml # coder (claude) → reviewer (codex), 质量敏感任务
+├── loop.yaml         # Ralph 风格:单 agent fresh-context 循环 prd.json
+└── prd.yaml          # 长 PRD,planner 拆 → 多 coder 并行 → 各自 reviewer
 ```
 
-**异常路径（agent 判断）：**
-- Planner 输出格式解析失败 → agent 重新提取
-- 失败后的决策（回退到哪个阶段）→ agent 分析
-- scope 冲突时的重编排 → agent 判断
+选哪个模板由 `router` 根据任务关键词决定,或用户用 `floo run --mode feature` 显式指定。
 
-dispatch 异常处理 agent 的 prompt 需要人工精心编写。
+**这里没有 LLM 编排**:模板是静态的、可读的、可手编辑的。如果你想要 LLM 动态生成 plan,见后面的 `--orchestrate` 高级模式。
 
-### 4. 任务入口：自动路由 + 显式覆盖
+### 4. Batch Plan (本次执行的实际图)
 
-```bash
-# 自动判断从哪个阶段开始
-floo run "重构支付模块，支持多币种"        # → Designer 开始
-floo run "给 /api/health 加 version"      # → 自动判断可跳过 Designer
-floo run "登录按钮没反应"                  # → 自动判断 bugfix
-
-# 显式覆盖
-floo run "..." --from coder               # 跳到 Coder
-floo run "..." --from reviewer --scope src/payment/  # 整体 review
-```
-
-router.ts 根据描述长度、关键词（bug/fix/refactor）、是否指定具体文件来自动路由。
-
----
-
-## 五、Review 策略
-
-### 1. 验收标准驱动
-
-task.json 中定义验收标准（Designer 或用户定义）：
-```yaml
-acceptance_criteria:
-  - /api/health 返回 { status: "ok", version: "1.0.0" }
-  - 有对应的单元测试
-  - 错误时返回 500 而非 crash
-```
-
-Reviewer 对着验收标准逐条检查，不做开放式评判。
-
-### 2. Review 分级
-
-Planner 在拆任务时为每个任务标注 `review_level`，决定验证深度：
+每次 `floo run` 把选中的模板复制到 `.floo/batches/<batchId>/plan.yaml`,并填入实际任务参数:
 
 ```yaml
-review_level: full | scan | skip
+batch_id: "2026-05-04-080748-abcd-feature"
+mode: feature
+budget:
+  max_runs: 12
+  max_wall_minutes: 60
+
+steps:
+  - id: discuss
+    capability: discuss
+    runtime: claude
+    model: opus
+
+  - id: design
+    capability: designer
+    runtime: claude
+    model: opus
+    depends_on: [discuss]
+
+  - id: plan
+    capability: planner
+    runtime: claude
+    depends_on: [design]
+
+  - id: implement-001
+    capability: coder
+    runtime: claude
+    scope: ["src/api/health.ts"]
+    depends_on: [plan]
+
+  - id: review-001
+    capability: reviewer
+    runtime: codex     # 跨 runtime 评审
+    depends_on: [implement-001]
+
+  - id: test-001
+    capability: tester
+    runtime: claude
+    depends_on: [implement-001, review-001]
 ```
 
-| Level | 适用场景 | 处理流程 |
-|-------|---------|---------|
-| `full` | 核心逻辑、状态机、资金安全、并发控制 | 派 cross-review agent → 必须 pass |
-| `scan` | 集成代码、adapter 实现、中等复杂度 | dispatcher 自动检查 scope + exit code，不派 review agent |
-| `skip` | CLI 胶水、skill 模板、配置、低风险 | 仅验证 scope（`git diff --stat`），直接标完成 |
+**plan.yaml 是这次执行的唯一事实源**。executor 只读这份文件,不知道也不关心"6 阶段"是什么。所有可恢复、可审计、可调试的需求都围绕它展开。
 
-**默认规则**：
-- 有 design.md + 验收标准 → 默认 `full`
-- 无 design.md → 默认 `scan`
-- 用户或 Planner 可显式覆盖
+#### plan-patch (动态调整,中等强度)
 
-### 3. 防止 Review 循环
+每个 step 跑完后,worker agent **可以**输出 `.floo/batches/<id>/patches/<stepId>.yaml`,executor 在调度下一节点前 apply:
 
-- Reviewer 只读不改代码，只输出 review.md
-- Reviewer 只检查：验收标准是否满足、明显 bug/安全漏洞、scope 越界。不检查风格偏好
-- Coder 收到 review 反馈后有权拒绝不合理意见（目标是满足验收标准）
-- **最多 2 轮 review**，2 轮还 fail → 暂停通知人介入
+```yaml
+add_steps:
+  - id: fix-typo
+    capability: coder
+    runtime: codex
+    scope: ["docs/README.md"]
+    depends_on: [review-001]
+```
 
-### 4. 整体 Review
+约束:
+- patch 只能**追加**节点,不能修改/删除已存在节点
+- 多个 worker 同时 patch 时,executor 串行 apply,先到先得
+- patch 不通过 schema 校验则丢弃,记录到 ledger
 
-批次完成后自动触发，只读报告，不修改代码。用户看完决定是否开新批次修改。
+这是"动态编排"住的地方:**离任务最近的 worker 决定下一步,而不是上层 LLM 编排者**。
 
----
+#### --orchestrate (高级模式,opt-in)
 
-## 六、错误处理
+`floo run --orchestrate` 会先调用一个 orchestrator agent(`skills/orchestrator.md`),让它读任务描述 + 项目上下文 + 当前 capabilities + runtimes,**生成**完整 plan.yaml,而不是从模板复制。
 
-| 失败环节 | 处理策略 |
-|---------|---------|
-| Designer/Planner 崩溃 | 直接重试，最多 3 次 |
-| Planner 输出格式不对 | 重试，追加格式要求 |
-| Coder scope 越界 | 检查冲突，无冲突接受，有冲突整体回退 |
-| Coder 代码编译失败 | 重试，带错误信息 |
-| Reviewer fail | 回 Coder，带 review 反馈 |
-| Tester fail | 回 Coder，带测试报告 |
-| 连续 fail 不收敛 | 到达重试上限（3 次）暂停，通知用户 |
+这是 opt-in,不是默认。理由:
 
-重试机制：第一次原始 prompt → 第二次带错误反馈 → 第三次可切换 runtime。
+- 大多数任务用静态模板就够,LLM 编排额外消耗 token
+- LLM 编排引入二级故障域,debug 成本上升
+- orchestrator 必须在 capability registry 内选步骤,不能凭空发明节点(executor 校验)
 
-### 任务取消
+### 5. DAG Executor + Run Ledger
 
-`floo cancel <taskId>`：kill tmux session → 回滚 scope 内的 unstaged changes（`git checkout -- <scope files>`）→ 更新状态为 cancelled。不做全局 `git checkout -- .`，避免误伤用户或其他任务的改动。
+#### Executor
 
----
+`src/core/executor.ts` 是 plan-driven 调度器,核心循环:
 
-## 七、数据流与持久化
+```
+1. 读 plan.yaml
+2. 计算就绪节点(deps 满足 + scope 不冲突 + 未达 max_runs)
+3. 启动节点 → 通过 runtime adapter 跑 tmux
+4. 等待完成信号(tmux wait-for)
+5. 收集 artifact,记录 run 到 ledger
+6. apply plan-patch (如有)
+7. 检查终止条件(全部完成 / budget 耗尽 / 不可恢复错误)
+8. 回到 step 2
+```
 
-### 全文件，不用 DB
+executor 不感知"phase 顺序",只感知"DAG 拓扑"。
 
-项目级配置文件 `floo.config.json` 放在项目根目录（用户可编辑，进 git）。
-`.floo/` 下只放运行时数据，全部 gitignore。
+#### Run Ledger
+
+每次 step 执行落盘一条 run 记录:
+
+```
+.floo/batches/<batchId>/
+├── plan.yaml
+├── patches/
+│   └── implement-001.yaml
+├── runs/
+│   ├── implement-001-1.json    # 第一次尝试
+│   ├── implement-001-2.json    # 重试
+│   └── review-001-1.json
+└── artifacts/
+    ├── context.md
+    ├── design.md
+    └── plan.md
+```
+
+run 记录包含:
+
+```json
+{
+  "step_id": "implement-001",
+  "attempt": 1,
+  "capability": "coder",
+  "runtime": "claude",
+  "model": "sonnet",
+  "started_at": "...",
+  "finished_at": "...",
+  "exit_code": 0,
+  "head_before": "abc123",
+  "head_after": "def456",
+  "files_changed": ["src/api/health.ts"],
+  "session_name": "floo-...",
+  "log_path": ".floo/.../logs/implement-001-1.log"
+}
+```
+
+ledger 是 UI 和恢复的数据源。
+
+## Routing (起点选择)
+
+`src/core/router.ts` 根据任务文本和参数选择 plan template:
+
+| 条件 | 选用模板 |
+|------|---------|
+| `--mode <name>` 显式指定 | 用户指定模板 |
+| 描述含 `bug/fix/typo` 且 scope 单文件 | `tiny.yaml` 或 `quick.yaml` |
+| 含 `review/audit` | 单步 reviewer |
+| 含 PRD 文件路径 | `prd.yaml` |
+| 含具体文件路径且 < 100 字 | 跳过 discuss/designer 的简化 plan |
+| 其他 | `feature.yaml`(完整 6 步) |
+
+`--from <step>` 退出整个 template 选择,直接构造单步或后缀 plan。
+
+## 状态机 vs DAG
+
+> **过渡期 vs 目标态**:目标是 DAG executor。当前仍是 6 阶段状态机。两者的语义对应关系:
+
+| 当前状态机概念 | 目标 DAG 概念 |
+|----------------|----------------|
+| `PHASE_ORDER` 常量 | `feature.yaml` 模板的 step 顺序 |
+| `dispatcher.ts` 状态推进 | `executor.ts` 拓扑调度 |
+| Discuss/Designer 飞轮 | discuss step 的 plan-patch(自我追加新轮 discuss) |
+| Reviewer fail → Coder retry | reviewer step 的 plan-patch(追加新 coder + reviewer) |
+| MAX_RETRIES = 3 | budget.max_runs + step.attempts |
+| `--from <phase>` | router 选模板 + 截断 |
+| `review_level: scan/skip` | plan 里 reviewer step 的存在与否 |
+
+完整迁移路径见 [refactor-plan.md](./refactor-plan.md)。
+
+## Parallel Scheduling
+
+executor 启动一个 step 的条件:
+
+- 所有 `depends_on` 已 completed
+- 与所有 running step 的 `scope` 无重叠(empty scope = 全局锁)
+- 未达 `concurrency.max_agents`
+- 未达 `budget.max_runs`
+
+`coder` capability 的 git 写操作由 runner 注入的 git wrapper 串行化(`concurrency.commit_lock` 启用时)。
+
+## Cancellation
+
+`floo cancel <batchId>` / `floo cancel <stepId>`:
+
+- 找到运行中的 tmux session,kill
+- 写一条 `cancelled` 状态的 run 记录
+- 标记 step 为 cancelled,不影响其他 step
+- 不做全局 git reset
+
+## Runtime Data Layout
 
 ```
 .floo/
-├── batches/                          # 批次和任务数据（见上文）
+├── batches/
+│   └── <batchId>/
+│       ├── plan.yaml
+│       ├── patches/
+│       ├── runs/
+│       ├── artifacts/
+│       └── logs/
 ├── sessions/
-│   └── {sessionName}.json            # tmux session 状态记录
-├── signals/
-│   └── {taskId}-{phase}.exit         # agent 完成信号
-├── notifications/
-│   └── {timestamp}-{event}.md        # 通知文件（交互层读取转发）
-├── lessons/
-│   └── 2026-04-07-codex-review.md    # 经验记录
-├── context/
-│   └── project-rules.md              # 唯一信息源（sync 生成 CLAUDE.md/AGENTS.md）
-├── logs/
-│   ├── system.log                    # 当前系统日志
-│   ├── system.log.1                  # 轮转归档
-│   └── system.log.2
-└── .gitignore
+├── signals/             # tmux 完成信号文件
+├── notifications/       # 给 UI / monitor 的事件
+├── lessons/             # floo learn 记录的经验
+├── context/             # floo learn --distill / sync 输出
+└── logs/                # 全局日志
 ```
 
-### 上下文传递（两层分离）
+## Operations
 
-1. **全局上下文**：`project-rules.md` 中的稳定规则（编码规范、commit 风格、保护文件等）→ `floo sync` 生成 CLAUDE.md / AGENTS.md，agent 启动时自动加载
-2. **任务上下文**：design.md、plan.md、验收标准、前次 review 反馈等 → 全部通过 dispatch prompt 传给 agent，不写进全局配置
+### Lessons
 
-agent 不需要知道 Floo 的存在，只通过 prompt 和项目配置文件获取上下文。
-任务态内容不污染全局上下文，并发任务时各自的 prompt 互不干扰。
+`floo learn` 在 `.floo/lessons/` 记录经验。`floo learn --distill` 提取稳定规则到 `.floo/context/project-rules.md`。`floo sync` 由这份规则生成 `CLAUDE.md` / `AGENTS.md`。这部分流程不受重构影响。
 
----
+### Health
 
-## 八、通知机制
+`src/core/health.ts` 检查 orphan session、stale running step、log 轮转。心跳更新 step 的 `last_heartbeat`。
 
-### 通知分层
+### Configuration
 
-- **Floo 输出**：结构化数据（任务 ID、状态、耗时、结果）写入 `.floo/notifications/`
-- **交互层 agent**：读取通知文件，用自然语言包装后通过自己的通道（Telegram/终端）发给用户
+`floo.config.json` 包含:
 
-### 通知时间点
+- `runtimes`:runtime 注册中心(目标态新增)
+- `concurrency`:max_agents、commit_lock
+- `budget_defaults`:默认 max_runs / max_wall_minutes
+- `loop_limits`:max_review_rounds、max_discuss_rounds(plan-patch 追加新节点的上限)
+- `protected_files`:任何 step 都不能改的文件
 
-| 事件 | 内容 |
-|------|------|
-| 任务启动 | session 名、模型、任务描述 |
-| 单任务完成 | 任务 ID、agent、结果摘要 |
-| 批次进度汇报 | 已完成列表、下一波任务、建议分配 |
-| 全部完成汇总 | 整体 review 报告 |
-| 异常/需人介入 | 错误详情、建议操作 |
+## Web UI
 
----
+`floo serve` 启动 `web/` 下的 Next.js 应用。目标态 UI 围绕**plan graph + runs**展示:
 
-## 九、学习与进化系统
+- batch 列表
+- 单个 batch 的 DAG 可视化(节点 = step,边 = depends_on)
+- 点击节点进入该 step 的 run 详情(prompt / log / artifact / diff / commit / 用量)
+- 实时刷新
 
-### 项目级 lessons
+> **过渡期**:当前 UI 围绕 task/phase 展示,需要在 executor 落地后调整数据访问层。
 
-```markdown
-# .floo/lessons/2026-04-07-codex-review.md
-# 问题
-Codex review 时修改了设计意图
-
-# 原因
-Reviewer prompt 没有包含 design.md
-
-# 解决
-已更新 Reviewer skill 模板
-
-# 标签
-reviewer, codex, design-intent
-```
-
-产生方式：
-- **自动**：任务失败重试成功后，house-elf 对比差异提取 lesson
-- **手动**：`floo learn "codex review 太激进"`
-
-lesson 积累到一定量 → house-elf 归纳提炼规则 → 写入 project-rules.md → `floo sync` 同步到 CLAUDE.md / AGENTS.md
-
-### 系统级 lessons
-
-存放在 `~/.floo/lessons/`，只积累，人工定时复盘。
-
-### 配置同步机制
-
-**单一信息源 + 生成器**：
-
-`.floo/context/project-rules.md` → 唯一维护的文件（只放稳定规则：编码规范、commit 风格、保护文件等）
-`floo sync` → 读取 project-rules.md，适配格式后生成 CLAUDE.md 和 AGENTS.md
-
-注意：任务态内容（design.md、plan.md、验收标准）不进 project-rules.md，只通过 dispatch prompt 传递。
-
-### house-elf 职责
-
-事件驱动，有需要才调起（不是定时 heartbeat）：
-- 记录和归纳 lesson
-- 同步配置文件（CLAUDE.md ↔ AGENTS.md）
-- 健康检查（孤儿 session 清理、stale task 检测）
-- tmux session 超时检查（有交互不杀，无响应才处理）
-- 日志轮转清理
-- 未来可扩展
-
-触发方式：
-- 被动：on-complete 检测到特定事件 → 调起
-- 主动：`floo sync`、`floo learn`
-- 可选：monitor 进程里低频检查（如每小时看一次 lesson 数量）
-
----
-
-## 十、日志系统
-
-**系统日志，给 AI 排障用，不是业务日志。**
-
-```
-[2026-04-07 14:30:01] [dispatch] task=T004 phase=coder runtime=codex session=floo-T004-coder started
-[2026-04-07 14:45:03] [callback] task=T004 phase=coder exit_code=0 duration=15m02s
-[2026-04-07 14:45:04] [scope-check] task=T004 files_changed=[src/api/health.ts] scope_match=true
-[2026-04-07 14:50:12] [error] task=T004 phase=reviewer exit_code=1 error="timeout"
-[2026-04-07 14:50:13] [retry] task=T004 phase=reviewer attempt=2/3 runtime=claude
-```
-
-单行纯文本，时间戳 + 模块 + 关键字段。按大小轮转（5MB/文件，保留 3 个），house-elf 负责清理。
-
----
-
-## 十一、配置体系
-
-### floo.config.json
-
-```yaml
-# 角色绑定（项目级覆盖）
-roles:
-  designer:  { runtime: claude, model: sonnet }
-  planner:   { runtime: claude, model: sonnet }
-  coder:     { runtime: claude, model: sonnet }
-  reviewer:  { runtime: codex,  model: codex-mini }
-  tester:    { runtime: claude, model: sonnet }
-
-# 并行配置
-concurrency:
-  max_agents: 3
-  commit_lock: true
-
-# session 生命周期（单位：分钟）
-session:
-  timeout_minutes: 30
-  keep_on_success_minutes: 30
-  keep_on_failure_minutes: 1440       # 24h
-  orphan_check_interval_minutes: 10
-
-# 保护机制（prompt 约束）
-protected_files:
-  - .env
-  - floo.config.json
-  - CLAUDE.md
-  - AGENTS.md
-```
-
-### 初始化（floo init）
-
-**新项目**：
-1. 创建 `.floo/` 完整目录结构
-2. 生成 `floo.config.json` 默认配置
-3. `.floo` 加入 `.gitignore`
-4. 检测有无 CLAUDE.md / AGENTS.md：无 → 从模板生成（含通用规范）；有 → 追加 floo section
-5. 扫描项目技术栈，记录到配置
-
-**老项目**：
-同上 + 扫描 git history 了解 commit 风格 + 生成 project-structure.md
-
----
-
-## 十二、Web UI
-
-**Next.js，Milestone 1 纯监控面板（只读）。**
-
-### 页面
-
-1. **任务列表**：状态徽章、runtime 标签、耗时、批次分组
-2. **任务详情**：artifact 文件内容、tmux 日志、PR 链接、run 历史
-3. **tmux Session 面板**：所有 session 的状态、关联任务、存活时间、活跃度
-
-### API（后端 Hono，读文件系统返回 JSON）
-
-```
-GET  /api/batches                  # 批次列表
-GET  /api/tasks                    # 任务列表
-GET  /api/tasks/:id                # 任务详情 + runs
-GET  /api/sessions                 # tmux session 状态
-POST /api/tasks/:id/retry          # 重试（唯一写操作）
-GET  /api/artifacts/*              # 静态文件
-```
-
----
-
-## 十三、E2E 测试
-
-Playwright 可选安装，非默认。
+## Testing
 
 ```bash
-floo init --with-playwright        # 安装 Playwright + 配置 MCP
+npm test
 ```
 
-Tester skill 模板包含 Playwright 规范：
-- 使用 `getByRole` / `getByText` 定位元素
-- 每个用例聚焦一个用户场景
-- 截图作为证据
+当前测试覆盖路由、scope 冲突、commit lock、skill loader、adapter、dispatcher 完整路径、reviewer/tester 循环、scan/skip 分级、多任务调度、`head_after` 追踪。
 
----
+**重构期间这些测试是契约**:executor 重写必须先通过适配层让现有测试继续过,才能动旧 dispatcher。详见 [refactor-plan.md](./refactor-plan.md) 第 4 步。
 
-## 十四、Skill 模板设计原则
+## Key Files (目标态)
 
-**约定输出格式，不约定过程。** 模板是核心竞争力，精心调试，允许项目级覆盖。
+- `src/core/executor.ts`:plan-driven DAG 执行器(目标新增)
+- `src/core/plan.ts`:plan 加载、校验、patch apply(目标新增)
+- `src/core/runtimes.ts`:runtime registry 加载(目标新增)
+- `src/core/skills/loader.ts`:skill metadata + body 解析
+- `src/core/scope.ts`:scope 冲突与越界检查(沿用)
+- `src/core/router.ts`:模板选择(简化)
+- `src/core/monitor.ts`:ledger 读 + cancellation(沿用接口,数据源切到 plan/runs)
+- `src/core/lessons.ts`:经验记录与蒸馏(沿用)
+- `src/core/health.ts`:运维检查(沿用)
+- `skills/*.md`:capability 行为契约(增加 frontmatter)
+- `templates/plans/*.yaml`:静态执行图模板(目标新增)
 
-每个角色的输出约定：
-- **Designer** → 自由 markdown（含设计检查清单 + 需求澄清机制）
-- **Planner** → 严格 YAML（dispatch 要解析）
-- **Coder** → 产出是 commit，无特殊格式
-- **Reviewer** → `verdict: pass/fail` + 反馈（含置信度分级：critical/important/suggestion）
-- **Tester** → `result: pass/fail` + 失败详情（按 QA 分类：console errors, broken links, form failures...）
+## 相关文档
 
-从参考项目提炼的微观实践（写入 skill 模板初始版本）：
-- Designer：Superpowers 的设计检查清单 + OMX 的需求澄清机制
-- Reviewer：Superpowers 的两阶段 review + gstack 的置信度分级
-- Tester：gstack 的 QA 分类体系
-- Coder："root cause first" 原则
-
----
-
-## 十五、第一里程碑：单任务全流程
-
-**目标**：`floo run "add a health check endpoint"` → Designer → Planner → Coder → Reviewer（交叉）→ 通知用户
-
-### 实现顺序
-
-**Phase 1: 基础设施**
-1. `packages/core/src/types.ts` — 所有类型定义
-2. `packages/core/src/scope.ts` — scope 冲突检测 + commit 锁
-3. `floo.config.json` schema 定义
-
-**Phase 2: Agent 适配器**
-4. `packages/core/src/adapters/base.ts` — 接口 + tmux 操作（spawn/isAlive/getOutput/sendMessage）
-5. `packages/core/src/adapters/claude.ts` — Claude Code adapter
-6. `packages/core/src/adapters/codex.ts` — Codex adapter
-
-**Phase 3: 核心调度**
-7. `packages/core/src/skills/loader.ts` — 加载 skill markdown + {{var}} 替换
-8. `skills/designer.md` + `skills/planner.md` + `skills/coder.md` + `skills/reviewer.md` — 四个核心 skill
-9. `packages/core/src/router.ts` — 任务自动路由
-10. `packages/core/src/dispatcher.ts` — 核心调度（状态机 + on-complete + dispatch）
-11. `packages/core/src/monitor.ts` — 状态监控（tmux wait-for + 轮询 CI）
-
-**Phase 4: CLI**
-12. `packages/cli/src/index.ts` — CLI 入口 (commander)
-13. `packages/cli/src/commands/init.ts` — 项目初始化
-14. `packages/cli/src/commands/run.ts` — 创建任务并执行
-15. `packages/cli/src/commands/status.ts` — 查看状态
-16. `packages/cli/src/commands/cancel.ts` — 取消任务
-17. `packages/cli/src/commands/monitor.ts` — 启动持续监控
-
-**Phase 5: Web UI**
-18. `packages/web/` — Next.js 项目
-19. 任务列表 + 任务详情 + tmux Session 面板
-20. Hono HTTP server (`packages/cli/src/commands/serve.ts`)
-
-### Milestone 1 不做（后续里程碑实现情况）
-
-- ✅ 多任务并行（M2 Batch 4 实现）
-- ✅ Tester 角色（M2 Batch 7 实现）
-- ✅ 整体 Review（M2 Batch 7 实现）
-- ✅ house-elf（M3 Batch 8 实现：lessons、配置同步、健康检查）
-- ✅ 通知文件输出（M2 Batch 6 实现）
-- ❌ OpenClaw adapter（M4 Batch 11）
-- ❌ 实时 WebSocket/SSE（M4）
-- ❌ Token 消耗追踪
-
-### Milestone 2 已完成
-
-- ✅ 多任务并行调度 + scope 冲突检测
-- ✅ Tester 角色
-- ✅ 批次管理 + 整体 Review
-- ✅ house-elf（lessons、配置同步、健康检查）
-- ✅ 通知系统
-- ✅ `floo learn` + `floo sync`
-- ✅ **post-commit 编译门禁**：`floo init` 安装 git hook，agent commit 时自动跑 `tsc --noEmit`，失败则 `git reset --soft` 让 agent 继续修
-- ✅ **dispatch heartbeat**：agent 运行期间每 5 分钟刷新 updated_at，health-check 15 分钟无更新报警
-
----
-
-## 十六、验证方式
-
-1. **端到端**：在真实项目下运行 `floo run "add a /health endpoint"`
-2. 验证链路：tmux session 启动 ✓ → agent 执行 ✓ → wait-for 回调触发 ✓ → 状态机流转 ✓ → review agent 启动 ✓ → 文件记录正确 ✓
-3. **Web UI**：`floo serve` → 浏览器看到任务和 session 状态
-4. **失败重试**：给一个会失败的任务 → 验证重试 + 错误上下文传递
-5. **取消任务**：`floo cancel` → 验证 session kill + 状态更新
-
----
-
-## 关键文件
-
-- `packages/core/src/dispatcher.ts` — 核心调度逻辑（状态机 + on-complete + dispatch）
-- `packages/core/src/adapters/base.ts` — agent 适配器基类 + tmux 操作 + floo-runner 生成
-- `packages/core/src/monitor.ts` — 状态查询（批次/任务查询、取消、超时检测）
-- `packages/core/src/scope.ts` — scope 冲突检测 + commit 锁
-- `packages/core/src/router.ts` — 任务自动路由
-- `packages/core/src/notifications.ts` — 通知文件输出
-- `packages/core/src/health.ts` — 健康检查（孤儿 session 清理、stale task、日志轮转）
-- `packages/core/src/lessons.ts` — 经验系统（lesson 记录/提取/规则提炼）
-- `skills/*.md` — skill 模板（核心竞争力）
+- [refactor-plan.md](./refactor-plan.md):从当前过渡到目标架构的具体步骤、测试策略、风险点
+- [dev-plan.md](./dev-plan.md):milestone 历史与未来规划
+- [discuss-design.md](./discuss-design.md):discuss capability 的内部设计细节(在新架构下作为内置 capability 之一)

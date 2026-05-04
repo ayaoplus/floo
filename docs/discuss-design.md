@@ -1,5 +1,7 @@
 # Discuss Phase 设计
 
+> **状态(2026-05-04 更新)**:本文档描述 discuss capability 的内部行为契约和 context schema,**仍然有效**。在新架构下(详见 [design.md](./design.md) / [refactor-plan.md](./refactor-plan.md)),discuss 不再是硬编码的"phase",而是 `skills/discuss.md` 注册的一个 capability,在 `feature.yaml` 等模板中作为标准 step 出现。本文中"phase / dispatcher / PHASE_ORDER"等表述属于过渡期描述,会在重构 Step 2 / Step 4 完成后被"step / executor / plan template"取代。
+
 ## 1. 为什么加 discuss
 
 Floo 当前流程 `designer → planner → coder → reviewer → tester`，designer 直接基于用户一句话的 description 产出 design.md。观察到的问题：

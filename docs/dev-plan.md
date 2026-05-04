@@ -1,158 +1,137 @@
-# Floo 开发计划
+# Floo Development Plan
 
-> 设计文档: [docs/design.md](./design.md)
-> 本文档是开发执行计划，供所有参与者读取。
+> 架构文档:[docs/design.md](./design.md)
+>
+> 重构路径:[docs/refactor-plan.md](./refactor-plan.md)
 
-## 参与者与分工
+本文档记录已完成的 milestones(M1-M3 已交付,M4 进行中)。**M5 / M6 原计划已被新架构吸收,具体执行步骤迁移至 [refactor-plan.md](./refactor-plan.md)**,本文档不再作为新功能的 roadmap,只保留历史。
 
-| 角色 | 职责 | 说明 |
-|------|------|------|
-| **Claude** | 全部开发 | 所有代码编写，可用 subagent 并行处理独立模块 |
-| **Codex** | Review | 每个 batch 结束后 review，重点模块深度审查 |
-| **人类** | 决策 | 设计变更确认、review 意见仲裁、batch 推进确认 |
+## Completed Milestones
 
-## 开发原则
+### M1: Single Task Pipeline
 
-1. **Claude 独占开发**：所有代码由 Claude 编写，避免多开发者上下文分裂
-2. **subagent 并行**：同一 batch 内无依赖的模块可用 subagent 并行开发
-3. **串行优先**：有依赖关系的模块严格串行
-4. **每个 batch 结束后 review**：Claude 开发完 → 提交 → Codex review → 人工确认 → 下一个 batch
-5. **原子提交**：每个模块一个 commit，commit message 说清楚干了什么
+Status: Done
 
----
+Delivered:
 
-# Milestone 1：单任务全流程 ✅
+- `floo init`;
+- `floo run`;
+- `floo status`;
+- core types, dispatcher, adapters, router, scope checks, monitor reads;
+- initial role templates;
+- TypeScript build and baseline tests.
 
-> 已完成。`floo init → floo run → floo status` 全链路打通。
+### M2: Multi-Task and Quality Gates
 
-## Batch 1：地基 ✅
+Status: Done
 
-| # | 文件 | 状态 |
-|---|------|------|
-| 1.1 | `packages/core/src/types.ts` | ✅ |
-| 1.2 | `packages/core/src/adapters/base.ts` | ✅ |
-| 1.3 | `packages/core/src/scope.ts` | ✅ |
-| 1.4 | `packages/core/src/skills/loader.ts` | ✅ |
+Delivered:
 
-## Batch 2：核心链路 ✅
+- planner YAML parsing with the `yaml` package;
+- multi-task batch scheduling;
+- scope conflict detection;
+- git write serialization for coder phases;
+- force-commit fallback for scoped dirty changes;
+- pre-commit and post-commit compile gates;
+- `floo run --detach`;
+- JSON notifications under `.floo/notifications/`;
+- tester phase;
+- batch-level summary review.
 
-| # | 文件 | 状态 |
-|---|------|------|
-| 2.1 | `packages/core/src/dispatcher.ts` | ✅ |
-| 2.2 | `packages/core/src/monitor.ts` | ✅ |
-| 2.3-2.4 | `adapters/claude.ts`, `adapters/codex.ts` | ✅ |
-| 2.5 | `packages/core/src/router.ts` | ✅ |
-| 2.6-2.9 | `skills/*.md` (4 个模板) | ✅ |
+### M3: Operations and Configuration
 
-## Batch 3：CLI 集成 ✅
+Status: Done
 
-| # | 文件 | 状态 |
-|---|------|------|
-| 3.1-3.6 | CLI 命令 (init/run/status/cancel/monitor) | ✅ |
+Delivered:
 
-### M1 已知限制（已在 M2 中解决）
+- `floo learn`;
+- `floo learn --list`;
+- `floo learn --distill`;
+- `.floo/context/project-rules.md`;
+- `floo sync`;
+- `floo config`;
+- health checks for stale tasks, sessions, and logs;
+- dispatcher heartbeat while phases are running;
+- task log capture for Web UI replay.
 
-- ~~单任务独占仓库，不支持并行~~ → Batch 4 多任务并行
-- ~~Planner 输出用正则解析~~ → 已改为 yaml 包完整解析
-- ~~无 force-commit 兜底~~ → Batch 5 实现
-- ~~无 `--detach` 后台模式~~ → Batch 6 实现
-- skill 模板需要在实际使用中迭代调优（Batch 9）
+## Current Milestone
 
----
+### M4: Web UI
 
-# Milestone 2：多任务并行 + 质量提升 ✅
+Status: In progress
 
-> 目标：多任务并行调度，编译门禁，通知文件输出，后台模式。
+Delivered:
 
-## Batch 4：多任务并行调度 ✅
+- `web/` Next.js app;
+- `floo serve`;
+- dashboard page;
+- task list page;
+- session page;
+- task detail page;
+- API routes for batches, tasks, sessions, artifacts, and logs;
+- shared Web UI data access in `web/lib/floo.ts`.
 
-> scope 无交集的任务并行 dispatch，有交集串行，commit 锁序列化 git 写操作。
+Remaining:
 
-## Batch 5：编译门禁 + force-commit ✅
+- polish dashboard information density;
+- add richer filtering/search;
+- add live refresh or SSE;
+- expose health-check state;
+- decide whether the UI stays read-only or gains explicit operations such as retry/cancel.
 
-> post-commit hook 跑 tsc，失败 soft reset；agent 退出后 scope 内未提交变更自动 commit。
+## Planned Milestones (已迁移至 refactor-plan.md)
 
-## Batch 6：后台模式 + 通知文件 ✅
+> ⚠️ **以下 M5 / M6 计划已废弃**,被新架构(plan-driven DAG)吸收。新方向见 [refactor-plan.md](./refactor-plan.md)。
+>
+> 关键变化:
+> - **M5 (Runtime Expansion)** → 重构后,新 runtime 只需在 `floo.config.json.runtimes` 加一段配置,不需要写 adapter 子类。详见 refactor-plan Step 5。
+> - **M6 (PRD / Ralph-Style Mode)** → 重构后,Ralph 风格只是一份 `templates/plans/loop.yaml` 模板,不是独立 milestone。PRD 风格是 `templates/plans/prd.yaml`。详见 refactor-plan Step 2。
+>
+> 原文保留以备追溯:
 
-> `floo run --detach` 后台运行，关键节点写通知文件到 `.floo/notifications/`。
+### ~~M5: Runtime Expansion~~ (deprecated)
 
----
+- OpenClaw adapter
+- custom adapter registration
+- richer model/runtime config
+- Codex reasoning effort config
+- retry-time model escalation
 
-## Batch 7：Tester 角色 + 整体 Review ✅
+### ~~M6: PRD / Ralph-Style Mode~~ (deprecated)
 
-> 核心目标：在 reviewer 之后加 tester 阶段，批次完成后做整体 review 报告。
+- accept a `prd.json` or markdown PRD as input
+- convert user stories into Floo batch tasks
+- preserve Floo's reviewer/tester/parallelism benefits while allowing Ralph-style fresh story loops
+- record story progress back to PRD-like state
 
-| # | 文件 | 状态 |
-|---|------|------|
-| 7.1 | `skills/tester.md` | ✅ |
-| 7.2 | `packages/core/src/types.ts` | ✅ |
-| 7.3 | `packages/core/src/dispatcher.ts` | ✅ |
-| 7.4 | `packages/cli/src/commands/init.ts` | ✅ |
-| 7.5 | `packages/core/src/dispatcher.ts` | ✅ |
+## Current Tests
 
----
+Run:
 
-# Milestone 3：运维与进化 (进行中)
+```bash
+npm test
+```
 
-> 目标：系统自我维护、经验积累、配置同步。Batch 8 已完成，Batch 9 待实施。
+Coverage areas:
 
-## Batch 8：house-elf ✅
+- type imports and default config shape;
+- scope conflict and out-of-scope logic;
+- commit lock helpers;
+- skill template loading;
+- router start-phase decisions;
+- adapter construction;
+- dispatcher happy path;
+- reviewer fail -> coder retry -> reviewer pass;
+- tester fail -> coder retry -> reviewer -> tester pass;
+- max review rounds;
+- coder retry exhaustion;
+- `review_level` scan/skip behavior;
+- multi-task batch scheduling;
+- `head_after` exit artifact diff tracking.
 
-| # | 任务 | 状态 |
-|---|------|------|
-| 8.1 | lesson 记录 | ✅ |
-| 8.2 | `floo learn "经验"` | ✅ |
-| 8.3 | 规则提炼 | ✅ |
-| 8.4 | `floo sync` | ✅ |
-| 8.5 | 健康检查 | ✅ |
-| 8.6 | dispatch heartbeat | ✅ |
+## Maintenance Rules
 
-## Batch 9：Skill 模板迭代
-
-| # | 任务 | 说明 | 状态 |
-|---|------|------|------|
-| 9.1 | 模板迭代 | 5 个 skill 模板重写：第一性原理审视、风险前置、验收标准锚定 | ✅ |
-| 9.2 | 项目级覆盖 | 支持目标项目自定义 skill 模板覆盖默认模板 | |
-
----
-
-# Milestone 4：Web UI + 扩展
-
-> 目标：可视化监控面板，更多 runtime 支持。
-
-## Batch 10：Web UI
-
-| # | 任务 | 说明 |
-|---|------|------|
-| 10.1 | `packages/web/` | Next.js 只读监控面板 |
-| 10.2 | 任务列表页 | 状态徽章、runtime 标签、耗时、批次分组 |
-| 10.3 | 任务详情页 | artifact 文件内容、run 历史、日志 |
-| 10.4 | `floo serve` | Hono HTTP server 读 .floo/ 返回 JSON |
-
-## Batch 11：扩展 Runtime
-
-| # | 任务 | 说明 |
-|---|------|------|
-| 11.1 | OpenClaw adapter | 第三个 runtime |
-| 11.2 | 自定义 adapter 机制 | 插件式注册新 runtime |
-| 11.3 | reasoning effort 配置 | Codex 的 medium/high/extra-high，重试时自动升级 |
-
----
-
-## 测试策略
-
-### 当前测试覆盖（70 cases）
-
-**test-batch1.ts**（46 cases）：
-- types 导入、scope 冲突检测（含空 scope）、commit 锁、skill 模板、tmux adapter
-- router 路由、adapter 导入、YAML 引号处理
-
-**test-dispatcher.ts**（24 cases）：
-- 单任务 happy path（coder → reviewer → tester）
-- reviewer fail → coder 重试 → reviewer pass
-- tester fail → coder 重试 → tester pass
-- max review rounds → failed
-- coder 重试 MAX_RETRIES → failed
-- review_level scan/skip
-- createAndRun 多任务并行调度
-- head_after exit artifact 字段验证
+- Keep documentation paths aligned with the actual repository layout.
+- When adding a CLI command, update both README files and this plan.
+- When changing phase order, update `README*`, `docs/design.md`, `SKILL.md`, and role templates together.
+- When changing `.floo/` persistence, update `docs/design.md` and the Web UI data access layer notes.
