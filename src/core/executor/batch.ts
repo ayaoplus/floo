@@ -348,8 +348,15 @@ async function runBatchEntry(
     return runPostPlannerExpansion(ctx);
   }
 
-  // 既无 planner 又无拆分:complex path 走完飞轮就结束(用户自定义 designer-only plan)
-  return finalizeBatchSuccess(ctx);
+  // wheel 或 planner 已经跑过 + 没拆分需求:直接收尾(避免重复 spawn 已跑的 phase)
+  if (shouldWheel || shouldPlanner) {
+    return finalizeBatchSuccess(ctx);
+  }
+
+  // 三个分支都没触发(自定义 designer-only / discuss+designer 无 loop_with 等):
+  // 退化为 simple path,通过 runTaskFromSteps 按 plan.steps 顺序逐个 phase 跑。
+  // runStateMachine 是 phase-agnostic 的,可以处理 designer / discuss / planner 等任意 phase。
+  return runSimplePath(startPhase, opts, batch, mainTask, batchId, config, flooDir, projectRoot);
 }
 
 /** 复杂 path 走完没有 planner/expansion 时的统一收尾(主任务标 completed + batch.status) */

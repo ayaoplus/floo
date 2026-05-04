@@ -506,6 +506,85 @@ console.log('\n=== 7. quick.yaml 模板 + createAndRun → 消费 plan.steps ===
 }
 
 // ============================================================
+// 8. createAndRun(opts.plan): designer-only complex plan(Step 4d 修复)
+// ============================================================
+// 回归 codex review #1 finding:designer-only / no-loop 的 complex plan
+// 应当真跑 designer,而不是 finalizeBatchSuccess 直接标 completed。
+
+console.log('\n=== 8. createAndRun: designer-only plan 真跑 designer phase ===');
+
+{
+  const dir = await setupTestProject();
+  try {
+    const adapter = new ReviewerPassAdapter();
+    const opts = {
+      projectRoot: dir,
+      config: TEST_CONFIG,
+      adapters: { codex: adapter, claude: adapter },
+    };
+
+    // 自定义 plan:只含 designer,没 discuss/planner/loop_with(complex 但无飞轮无拆分)
+    const designerOnly = {
+      schema_version: 1 as const,
+      name: 'designer-only',
+      steps: [
+        { id: 'design-1', capability: 'designer' as const },
+      ],
+    };
+
+    const result = await createAndRun('designer-only test', 'designer', {
+      ...opts,
+      plan: designerOnly,
+    });
+
+    assert(result.batch.status === 'completed', 'designer-only batch 完成');
+    assert(adapter.spawned.length === 1, 'designer phase 被 spawn 1 次');
+    assert(adapter.spawned[0].phase === 'designer', 'spawn 的 phase = designer(不是直接 finalize)');
+    assert(result.tasks[0].status === 'completed', 'task 完成');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+console.log('\n=== 8b. createAndRun: discuss+designer 无 loop_with → 也按 plan 顺序跑 ===');
+
+{
+  const dir = await setupTestProject();
+  try {
+    const adapter = new ReviewerPassAdapter();
+    const opts = {
+      projectRoot: dir,
+      config: TEST_CONFIG,
+      adapters: { codex: adapter, claude: adapter },
+    };
+
+    // 含 discuss + designer 但无 loop_with → planHasDiscussDesignerLoop=false
+    // 不应该跳过两个 phase
+    const noLoopPlan = {
+      schema_version: 1 as const,
+      name: 'no-loop',
+      steps: [
+        { id: 'd1', capability: 'discuss' as const },
+        { id: 'd2', capability: 'designer' as const, depends_on: ['d1'] },
+      ],
+    };
+
+    const result = await createAndRun('no-loop test', 'discuss', {
+      ...opts,
+      plan: noLoopPlan,
+    });
+
+    assert(result.batch.status === 'completed', 'no-loop batch 完成');
+    assert(adapter.spawned.length === 2, 'discuss + designer 各 spawn 1 次');
+    const phases = adapter.spawned.map(s => s.phase);
+    assert(phases.includes('discuss'), 'discuss phase 被 spawn');
+    assert(phases.includes('designer'), 'designer phase 被 spawn');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
 // 结果
 // ============================================================
 
