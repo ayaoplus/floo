@@ -405,7 +405,7 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 
 | Step | 状态 | 备注 |
 |------|------|------|
-| 1. plan.yaml 落盘(只读镜像) | ✅ Done | `src/core/plan.ts` + `test/plan.test.ts`(48 断言);commit `<待补>` |
+| 1. plan.yaml 落盘(只读镜像) | ✅ Done | `src/core/plan.ts` + `test/plan.test.ts`(48 断言);commit `bddc89e` |
 | 2. templates/plans/ + loadTemplate(纯 loader,零行为变化) | ⬜ Pending | |
 | 3. Skill frontmatter | ⬜ Pending | Step 4 前置 |
 | 4. Executor 内化 + 模板驱动行为切换(dispatcher 退化为 shim) | ⬜ Pending | **核心步骤,需独立分支;首次承诺模板驱动行为变化** |
