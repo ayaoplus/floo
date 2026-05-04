@@ -38,8 +38,20 @@ export { CodexAdapter } from './adapters/codex.js';
 // Router
 export { routeTask } from './router.js';
 
-// Dispatcher
+// Dispatcher (thin shim — 实现在 executor/state-machine.ts 与 executor/batch.ts)
 export { runTask, createAndRun, type DispatcherOptions } from './dispatcher.js';
+
+// Plan-driven 入口 (Step 4c)
+// runTaskFromSteps: 接受外部 RunStep[],真 plan 驱动 step 序列
+// planStepsToRunSteps: 把 plan.yaml 声明 steps 转成运行时 steps
+export { runTaskFromSteps } from './executor/state-machine.js';
+export {
+  planStepsToRunSteps,
+  makeStepsForPhaseRange,
+  type RunStep,
+  type RunState,
+  type StepStatus,
+} from './executor/state.js';
 
 // Executor (Step 4a: plan-driven 入口,内部仍委托 dispatcher;Step 4b 后状态机搬入)
 export {

@@ -1,15 +1,16 @@
 /**
  * 单 task 多 phase 状态机
  *
- * 从 startPhase 开始,驱动状态机流转到 endPhase(含)或失败。
+ * Step 4c 改造:
+ *   - 主循环操作 RunState(step 数组 + currentIdx + 计数器),不再用 phaseIdx + PHASE_ORDER 索引
+ *   - runTask 兼容入口:接受 (task, startPhase, opts, endPhase?),内部 makeStepsForPhaseRange 合成
+ *   - runTaskFromSteps 新入口:接受外部 RunStep[],适合从 plan.yaml 派生的 step 列表
+ *
  * 内部副作用:
- *   - reviewer fail → 回 coder 重跑(maxReviewRounds 内)
- *   - tester fail  → 回 coder 重跑 + 重置 reviewRounds
+ *   - reviewer fail → rollbackToPhase(state, 'coder')(maxReviewRounds 内)
+ *   - tester fail  → rollbackToPhase(state, 'coder') + 重置 reviewRounds
  *   - planner 完成 → consumePlannerOutput 拆 task(单任务时合并到当前 task)
  *   - coder 完成 → 检查 protected files / scope violation / 过滤 exit artifact
- *
- * 这个文件就是原 dispatcher.runTask 搬过来的 + 替换 import 路径。
- * 后续会进一步改造为消费 PlanState 而不是 (task, startPhase) 元组。
  */
 
 import { readFile, writeFile } from 'node:fs/promises';
@@ -17,7 +18,6 @@ import { join } from 'node:path';
 
 import type { AgentAdapter, Batch, FlooConfig, Phase, Task } from '../types.js';
 import {
-  PHASE_ORDER,
   MAX_REVIEW_ROUNDS,
   MAX_TEST_ROUNDS,
   DEFAULT_CONFIG,
@@ -31,6 +31,15 @@ import { collectArtifact, cleanStaleArtifact } from './artifacts.js';
 import { consumePlannerOutput } from './planner.js';
 import { executePhase } from './execute-step.js';
 import { checkReviewVerdict, checkTestResult } from './verdict.js';
+import {
+  type RunState,
+  type RunStep,
+  advance,
+  currentStep,
+  makeRunState,
+  makeStepsForPhaseRange,
+  rollbackToPhase,
+} from './state.js';
 
 // ============================================================
 // 公共选项类型
@@ -38,10 +47,7 @@ import { checkReviewVerdict, checkTestResult } from './verdict.js';
 
 /**
  * runTask / createAndRun 共享的运行选项。
- *
- * 历史上叫 DispatcherOptions,从 dispatcher.ts 搬到这里后名称保留——
- * 外部消费者(包括 dispatcher.test)都还从 './dispatcher.js' 拿这个类型,
- * dispatcher.ts 现在 re-export。
+ * 历史上叫 DispatcherOptions,从 dispatcher.ts 搬过来后保留同名兼容外部消费者。
  */
 export interface DispatcherOptions {
   projectRoot: string;
@@ -52,61 +58,96 @@ export interface DispatcherOptions {
 }
 
 // ============================================================
-// runTask
+// runTask 公共入口(兼容 + 新)
 // ============================================================
 
-/** 任务起步后跑到结束的状态机主循环 */
+/**
+ * 兼容入口:任务从 startPhase 起步跑到 endPhase(含)或失败。
+ * 内部 makeStepsForPhaseRange 合成 step 列表后调用 runTaskFromSteps。
+ */
 export async function runTask(
   task: Task,
   startPhase: Phase,
   opts: DispatcherOptions,
   endPhase?: Phase,
 ): Promise<Task> {
+  const steps = makeStepsForPhaseRange(startPhase, endPhase);
+  return runTaskFromSteps(task, steps, opts);
+}
+
+/**
+ * 新入口:接受外部 RunStep[](通常来自 plan.yaml 的 PlanStep[] 转换)。
+ * 让 plan.yaml 真正驱动执行序列——而不是 PHASE_ORDER。
+ *
+ * 用法示例(executor.runPlan / commands/run --mode 走这条):
+ *   const planSteps = planStepsToRunSteps(plan.steps);
+ *   await runTaskFromSteps(task, planSteps, opts);
+ */
+export async function runTaskFromSteps(
+  task: Task,
+  steps: RunStep[],
+  opts: DispatcherOptions,
+): Promise<Task> {
+  if (steps.length === 0) {
+    throw new Error('runTaskFromSteps: steps 数组为空');
+  }
+  const state = makeRunState(steps);
+  return runStateMachine(task, state, opts);
+}
+
+// ============================================================
+// runStateMachine:主循环(消费 RunState)
+// ============================================================
+
+/**
+ * 真正的状态机循环:
+ *   1. 取 currentStep,abort 检查
+ *   2. review_level 短路(scan/skip)
+ *   3. executePhase + collectArtifact
+ *   4. capability-specific 后处理(planner/reviewer/tester/coder)
+ *   5. 后处理可能 rollbackToPhase('coder') 实现 retry,或 advance() 推进
+ */
+async function runStateMachine(
+  task: Task,
+  state: RunState,
+  opts: DispatcherOptions,
+): Promise<Task> {
   const { projectRoot, adapters } = opts;
   const config = opts.config ?? DEFAULT_CONFIG;
   const flooDir = await ensureFlooDir(projectRoot);
 
-  const startIdx = PHASE_ORDER.indexOf(startPhase);
-  if (startIdx === -1) throw new Error(`Invalid start phase: ${startPhase}`);
-  const endIdx = endPhase ? PHASE_ORDER.indexOf(endPhase) : PHASE_ORDER.length - 1;
-
   task.status = 'running';
   await saveTask(flooDir, task);
-  await log(flooDir, 'dispatch', { task: task.id, start_phase: startPhase });
+  await log(flooDir, 'dispatch', { task: task.id, start_phase: state.steps[0].phase });
 
   const maxReviewRounds = config.limits?.max_review_rounds ?? MAX_REVIEW_ROUNDS;
   const maxTestRounds = config.limits?.max_test_rounds ?? MAX_TEST_ROUNDS;
 
-  let reviewRounds = 0;
-  let testRounds = 0;
-  let runCounter = 0;
-
-  let phaseIdx = startIdx;
-  while (phaseIdx <= endIdx) {
+  while (state.currentIdx < state.steps.length) {
     if (opts.signal?.aborted) {
       task.status = 'cancelled';
       task.current_phase = null;
       await saveTask(flooDir, task);
-      await log(flooDir, 'aborted', { task: task.id, phase: PHASE_ORDER[phaseIdx] });
+      await log(flooDir, 'aborted', { task: task.id, phase: currentStep(state)?.phase });
       return task;
     }
 
-    const phase = PHASE_ORDER[phaseIdx];
+    const step = currentStep(state)!;  // currentIdx 边界已被 while 守护
+    const phase = step.phase;
 
-    // review_level 短路:scan/skip 时不派 reviewer agent
+    // review_level=scan/skip 短路
     if (phase === 'reviewer') {
       const sc = await applyReviewShortCircuit(task, flooDir);
-      if (sc === 'fail-return') return task;          // scan 检测到 coder 失败,直接 return
-      if (sc === 'skip-phase') { phaseIdx++; continue; }  // scan-pass 或 skip,跳过 reviewer 继续
-      // 'run-normally' → 正常派 reviewer agent
+      if (sc === 'fail-return') return task;
+      if (sc === 'skip-phase') { advance(state); continue; }
     }
 
     task.current_phase = phase;
     await saveTask(flooDir, task);
     await cleanStaleArtifact(projectRoot, phase, task.id);
 
-    runCounter++;
-    const result = await executePhase(task, phase, config, flooDir, projectRoot, adapters, runCounter);
+    state.runCounter++;
+    const result = await executePhase(task, phase, config, flooDir, projectRoot, adapters, state.runCounter);
 
     if (!result.success) {
       const wasCancelled = result.exitArtifact?.exit_code === -1;
@@ -127,22 +168,32 @@ export async function runTask(
     }
 
     if (phase === 'reviewer') {
-      const next = await handleReviewerVerdict(task, flooDir, startIdx, endIdx, maxReviewRounds, reviewRounds);
+      const next = await handleReviewerVerdict(task, flooDir, state, maxReviewRounds);
       if (next.action === 'fail') return task;
       if (next.action === 'retry-coder') {
-        reviewRounds = next.reviewRounds;
-        phaseIdx = PHASE_ORDER.indexOf('coder');
+        state.reviewRounds = next.reviewRounds;
+        if (!rollbackToPhase(state, 'coder')) {
+          // coder 不在 step 列表里(--from reviewer),其实已被 handleReviewerVerdict 标 fail 走前面
+          // 这里只是兜底:若意外进入,直接退出避免死循环
+          task.status = 'failed';
+          await saveTask(flooDir, task);
+          return task;
+        }
         continue;
       }
     }
 
     if (phase === 'tester') {
-      const next = await handleTesterVerdict(task, flooDir, startIdx, endIdx, maxTestRounds, testRounds);
+      const next = await handleTesterVerdict(task, flooDir, state, maxTestRounds);
       if (next.action === 'fail') return task;
       if (next.action === 'retry-coder') {
-        testRounds = next.testRounds;
-        reviewRounds = 0;  // 重置 review 轮数
-        phaseIdx = PHASE_ORDER.indexOf('coder');
+        state.testRounds = next.testRounds;
+        state.reviewRounds = 0;  // 重置 review 轮数,新一轮 coder→reviewer→tester
+        if (!rollbackToPhase(state, 'coder')) {
+          task.status = 'failed';
+          await saveTask(flooDir, task);
+          return task;
+        }
         continue;
       }
     }
@@ -152,7 +203,7 @@ export async function runTask(
       if (violationResult === 'fail') return task;
     }
 
-    phaseIdx++;
+    advance(state);
   }
 
   task.status = 'completed';
@@ -164,7 +215,7 @@ export async function runTask(
 }
 
 // ============================================================
-// 拆出来的小函数(每个 phase 后处理 + review_level 短路)
+// 子流程 handlers
 // ============================================================
 
 /**
@@ -219,10 +270,8 @@ type ReviewerOutcome =
 async function handleReviewerVerdict(
   task: Task,
   flooDir: string,
-  startIdx: number,
-  endIdx: number,
+  state: RunState,
   maxReviewRounds: number,
-  reviewRounds: number,
 ): Promise<ReviewerOutcome> {
   const verdict = await checkReviewVerdict(flooDir, task);
   if (verdict === 'pass') {
@@ -231,16 +280,16 @@ async function handleReviewerVerdict(
     return { action: 'pass' };
   }
   // fail
-  // 单 phase 模式 (--from reviewer):coder 不在范围内,无法回退
-  const coderInRange = PHASE_ORDER.indexOf('coder') >= startIdx && PHASE_ORDER.indexOf('coder') <= endIdx;
-  if (!coderInRange) {
+  // 单 phase 模式 (--from reviewer):coder 不在 step 列表里,无法回退
+  const hasCoder = state.steps.some(s => s.phase === 'coder');
+  if (!hasCoder) {
     task.status = 'failed';
     await saveTask(flooDir, task);
     await log(flooDir, 'failed', { task: task.id, reason: 'review_fail_no_coder', verdict: 'fail' });
     await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'review_fail_no_coder' });
     return { action: 'fail' };
   }
-  const next = reviewRounds + 1;
+  const next = state.reviewRounds + 1;
   if (next >= maxReviewRounds) {
     task.status = 'failed';
     await saveTask(flooDir, task);
@@ -262,10 +311,8 @@ type TesterOutcome =
 async function handleTesterVerdict(
   task: Task,
   flooDir: string,
-  startIdx: number,
-  endIdx: number,
+  state: RunState,
   maxTestRounds: number,
-  testRounds: number,
 ): Promise<TesterOutcome> {
   const result = await checkTestResult(flooDir, task);
   if (result === 'pass') {
@@ -273,15 +320,15 @@ async function handleTesterVerdict(
     await notify(flooDir, 'review_concluded', { batch_id: task.batch_id, task_id: task.id, phase: 'tester', verdict: 'pass' });
     return { action: 'pass' };
   }
-  const coderInRange = PHASE_ORDER.indexOf('coder') >= startIdx && PHASE_ORDER.indexOf('coder') <= endIdx;
-  if (!coderInRange) {
+  const hasCoder = state.steps.some(s => s.phase === 'coder');
+  if (!hasCoder) {
     task.status = 'failed';
     await saveTask(flooDir, task);
     await log(flooDir, 'failed', { task: task.id, reason: 'test_fail_no_coder', verdict: 'fail' });
     await notify(flooDir, 'task_completed', { batch_id: task.batch_id, task_id: task.id, status: 'failed', reason: 'test_fail_no_coder' });
     return { action: 'fail' };
   }
-  const next = testRounds + 1;
+  const next = state.testRounds + 1;
   if (next >= maxTestRounds) {
     task.status = 'failed';
     await saveTask(flooDir, task);

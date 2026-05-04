@@ -21,7 +21,7 @@ import {
 } from '../types.js';
 import { ensureFlooDir, detectConflicts } from '../scope.js';
 import { notify } from '../notifications.js';
-import { synthesizeInitialPlan, writePlan } from '../plan.js';
+import { synthesizeInitialPlan, writePlan, type PlanTemplate } from '../plan.js';
 
 import { log, saveTask, saveBatch, deriveBatchToken } from './io.js';
 import {
@@ -35,7 +35,8 @@ import {
 import { consumePlannerOutput } from './planner.js';
 import { executePhase } from './execute-step.js';
 import { runBatchSummaryReview } from './summary.js';
-import { runTask, type DispatcherOptions } from './state-machine.js';
+import { runTask, runTaskFromSteps, type DispatcherOptions } from './state-machine.js';
+import { planStepsToRunSteps } from './state.js';
 
 const exec = promisify(execFile);
 
@@ -184,7 +185,16 @@ export async function runBatch(
 export async function createAndRun(
   description: string,
   startPhase: Phase,
-  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase },
+  opts: DispatcherOptions & {
+    scope?: string[];
+    endPhase?: Phase;
+    /**
+     * 可选 plan 模板。simple path(coder/reviewer/tester 起步)上,
+     * 如果给了 plan 则直接消费 plan.steps 驱动执行,而不是从 PHASE_ORDER 派生。
+     * 复杂 path(discuss/designer/planner)目前仍走飞轮硬编码,Step 4d 后才消费 plan。
+     */
+    plan?: PlanTemplate;
+  },
 ): Promise<{ batch: Batch; tasks: Task[] }> {
   const { projectRoot } = opts;
   const config = opts.config ?? DEFAULT_CONFIG;
@@ -313,7 +323,7 @@ async function runBatchEntry(
 
 async function runSimplePath(
   startPhase: Phase,
-  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase },
+  opts: DispatcherOptions & { scope?: string[]; endPhase?: Phase; plan?: PlanTemplate },
   batch: Batch,
   mainTask: Task,
   batchId: string,
@@ -321,10 +331,20 @@ async function runSimplePath(
   flooDir: string,
   projectRoot: string,
 ): Promise<{ batch: Batch; tasks: Task[] }> {
-  // 显式 opts.endPhase 优先(--mode tiny/quick 走这条);
-  // 否则:reviewer/tester 单 phase,coder 跑完整 coder→reviewer→tester
-  const endPhase = opts.endPhase ?? (startPhase === 'coder' ? undefined : startPhase);
-  const result = await runTask(mainTask, startPhase, opts, endPhase);
+  // 优先级:opts.plan(plan-driven) > opts.endPhase(--mode tiny/quick 旧路径) > 默认推断
+  let result: Task;
+  if (opts.plan) {
+    // plan-driven:plan.yaml 真正决定 step 序列
+    const runSteps = planStepsToRunSteps(opts.plan.steps);
+    if (runSteps.length === 0) {
+      throw new Error(`runSimplePath: plan "${opts.plan.name}" 没有可执行 step(deferred 占位被全部过滤)`);
+    }
+    result = await runTaskFromSteps(mainTask, runSteps, opts);
+  } else {
+    // 兼容路径:沿用 (startPhase, endPhase) 推断
+    const endPhase = opts.endPhase ?? (startPhase === 'coder' ? undefined : startPhase);
+    result = await runTask(mainTask, startPhase, opts, endPhase);
+  }
   batch.status = result.status === 'completed' ? 'completed'
     : result.status === 'cancelled' ? 'cancelled'
     : 'failed';

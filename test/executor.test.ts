@@ -20,12 +20,16 @@ import { promisify } from 'node:util';
 import {
   runPlan,
   runPlanFromDisk,
+  runTaskFromSteps,
+  createAndRun,
+  loadTemplate,
   synthesizeInitialPlan,
   writePlan,
   ensureFlooDir,
   DEFAULT_CONFIG,
   type ExecutorOptions,
   type PlanYaml,
+  type RunStep,
 } from '../src/core/index.js';
 import type { Task, Batch, AgentAdapter, SpawnOptions, ExitArtifact, Phase, Runtime, FlooConfig } from '../src/core/index.js';
 
@@ -317,6 +321,185 @@ console.log('\n=== 4b. runPlanFromDisk: 不存在的 batchId 抛错 ===');
       assert(msg.includes('未找到 plan.yaml'), '错误信息提示 plan.yaml 不存在');
       assert(msg.includes('no-such-batch-id'), '错误信息含 batchId');
     }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 5. runTaskFromSteps: 直接接受 RunStep[] 跑 (Step 4c)
+// ============================================================
+
+console.log('\n=== 5. runTaskFromSteps: 外部 step 列表驱动 ===');
+
+{
+  const dir = await setupTestProject();
+  try {
+    const reviewer = new ReviewerPassAdapter();
+    const opts = {
+      projectRoot: dir,
+      config: TEST_CONFIG,
+      adapters: { codex: reviewer, claude: reviewer },
+    };
+
+    const fakeBatch: Batch = {
+      id: '2026-05-04-runtaskfromsteps-test',
+      description: 'plan-driven runTask',
+      status: 'active',
+      tasks: ['rtfs-001'],
+      created_at: '2026-05-04T10:00:00Z',
+      updated_at: '2026-05-04T10:00:00Z',
+    };
+    const fakeTask: Task = {
+      id: 'rtfs-001',
+      batch_id: fakeBatch.id,
+      description: fakeBatch.description,
+      status: 'pending',
+      current_phase: null,
+      scope: ['src/'],
+      acceptance_criteria: [],
+      review_level: 'full',
+      created_at: fakeBatch.created_at,
+      updated_at: fakeBatch.updated_at,
+      depends_on: [],
+    };
+
+    // 用户自定义的 step 列表(模拟来自 plan.yaml)
+    const customSteps: RunStep[] = [
+      { id: 'review-only', phase: 'reviewer', status: 'pending' },
+    ];
+
+    // 需要先把 batch + task 落盘(runTaskFromSteps 不做这事)
+    const { mkdir, writeFile } = await import('node:fs/promises');
+    const flooDir = join(dir, '.floo');
+    await mkdir(join(flooDir, 'batches', fakeBatch.id), { recursive: true });
+    await writeFile(join(flooDir, 'batches', fakeBatch.id, 'batch.json'), JSON.stringify(fakeBatch, null, 2));
+    await mkdir(join(flooDir, 'batches', fakeBatch.id, 'tasks', fakeTask.id), { recursive: true });
+    await writeFile(join(flooDir, 'batches', fakeBatch.id, 'tasks', fakeTask.id, 'task.json'), JSON.stringify(fakeTask, null, 2));
+
+    const result = await runTaskFromSteps(fakeTask, customSteps, opts);
+    assert(result.status === 'completed', 'runTaskFromSteps 完成');
+    assert(reviewer.spawned.length === 1, 'reviewer 被调用 1 次');
+    assert(reviewer.spawned[0].phase === 'reviewer', 'spawn 的 phase = reviewer');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+console.log('\n=== 5b. runTaskFromSteps: 空 steps 抛错 ===');
+
+{
+  try {
+    await runTaskFromSteps(
+      {} as Task,
+      [],
+      { projectRoot: '/tmp/fake', adapters: {} },
+    );
+    assert(false, '空 steps 应抛错');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    assert(msg.includes('steps 数组为空'), '错误信息含"steps 数组为空"');
+  }
+}
+
+// ============================================================
+// 6. createAndRun(opts.plan): plan-driven simple path (Step 4c)
+// ============================================================
+
+console.log('\n=== 6. createAndRun(opts.plan): plan 驱动 simple path ===');
+
+{
+  const dir = await setupTestProject();
+  try {
+    const reviewer = new ReviewerPassAdapter();
+    const opts = {
+      projectRoot: dir,
+      config: TEST_CONFIG,
+      adapters: { codex: reviewer, claude: reviewer },
+    };
+
+    // 加载 quick.yaml,但只用其 reviewer step 部分
+    // 这里我们伪造一个含单 reviewer 的 plan,模拟用户编辑 plan 加自定义 step 序列
+    const customPlan = {
+      schema_version: 1 as const,
+      name: 'custom-reviewer-only',
+      steps: [
+        { id: 'review-only', capability: 'reviewer' as const },
+      ],
+    };
+
+    const result = await createAndRun('plan-driven test', 'reviewer', {
+      ...opts,
+      plan: customPlan,
+    });
+
+    assert(result.tasks.length === 1, 'createAndRun(plan) 返回单 task');
+    assert(result.batch.status === 'completed', 'batch 完成');
+    assert(reviewer.spawned[0].phase === 'reviewer', '只跑了 reviewer step');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+console.log('\n=== 6b. createAndRun(opts.plan): plan 仅含 deferred 占位时抛错 ===');
+
+{
+  const dir = await setupTestProject();
+  try {
+    const reviewer = new ReviewerPassAdapter();
+    const opts = {
+      projectRoot: dir,
+      config: TEST_CONFIG,
+      adapters: { codex: reviewer, claude: reviewer },
+    };
+    const allDeferred = {
+      schema_version: 1 as const,
+      name: 'all-deferred',
+      steps: [
+        { id: 'a', capability: 'coder' as const, status: 'deferred' as const },
+        { id: 'b', capability: 'reviewer' as const, status: 'deferred' as const },
+      ],
+    };
+    // createAndRun 顶层 try/catch 会把 error 转成 batch.status='failed' (crash protection)
+    const result = await createAndRun('all deferred', 'coder', { ...opts, plan: allDeferred });
+    assert(result.batch.status === 'failed', '全 deferred plan 触发 batch 失败');
+    assert(result.tasks[0].status === 'failed', 'task 也标记 failed');
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// ============================================================
+// 7. loadTemplate('quick') + createAndRun: 真消费 plan.yaml
+// ============================================================
+
+console.log('\n=== 7. quick.yaml 模板 + createAndRun → 消费 plan.steps ===');
+
+{
+  const dir = await setupTestProject();
+  try {
+    const reviewer = new ReviewerPassAdapter();
+    const opts = {
+      projectRoot: dir,
+      config: TEST_CONFIG,
+      adapters: { codex: reviewer, claude: reviewer },
+    };
+
+    const quickPlan = await loadTemplate('quick');
+    // quick = coder + reviewer,但 mock coder 不会写文件;改成 reviewer 起步走单步
+    // 这里只验证"plan.steps 被消费"——通过 reviewer 起步 + 单 reviewer step 验证
+    const reviewerOnlyPlan = {
+      ...quickPlan,
+      steps: quickPlan.steps.filter(s => s.capability === 'reviewer'),
+    };
+
+    const result = await createAndRun('quick template test', 'reviewer', {
+      ...opts,
+      plan: reviewerOnlyPlan,
+    });
+
+    assert(result.batch.status === 'completed', 'batch 完成');
+    assert(reviewer.spawned.length === 1, 'plan 里只有 1 个 reviewer step → 跑 1 次');
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

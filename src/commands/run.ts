@@ -81,20 +81,29 @@ export const runCommand = new Command('run')
       process.exit(0);
     }
 
-    // 决定 startPhase + 可选 endPhase:
-    //   --mode 优先(从模板读 startPhase / endPhase)
+    // 决定 startPhase + 可选 endPhase + plan:
+    //   --mode 优先(从模板读 startPhase / endPhase / plan)
     //   否则走 routeTask(--from 或自动判断)
+    //
+    // plan 仅在 simple path(coder/reviewer/tester 起步)上被 createAndRun 实际消费,
+    // 复杂 path(discuss/designer/planner)目前忽略 plan 走原飞轮逻辑。
     let startPhase: Phase;
     let endPhase: Phase | undefined;
+    let plan: Awaited<ReturnType<typeof loadTemplate>> | undefined;
     if (options.mode) {
       try {
-        const tpl = await loadTemplate(options.mode);
-        const phases = templateToPhases(tpl);
+        plan = await loadTemplate(options.mode);
+        const phases = templateToPhases(plan);
         startPhase = phases.startPhase;
         endPhase = phases.endPhase;
         console.log(`任务: ${description}`);
-        console.log(`模板: ${options.mode} (${tpl.description ?? ''})`);
+        console.log(`模板: ${options.mode} (${plan.description ?? ''})`);
         console.log(`阶段范围: ${startPhase}${endPhase ? ` → ${endPhase}` : ' → 全流程'}`);
+        if (startPhase === 'discuss' || startPhase === 'designer' || startPhase === 'planner') {
+          console.log('提示: 复杂 path(含飞轮 / planner 拆分)目前不消费模板 step,仅取首尾 phase 范围');
+        } else {
+          console.log(`Plan-driven: ${plan.steps.length} 个 step`);
+        }
       } catch (err) {
         console.error(`加载模板失败: ${err instanceof Error ? err.message : err}`);
         process.exit(1);
@@ -148,6 +157,7 @@ export const runCommand = new Command('run')
         scope: options.scope,
         signal: ac.signal,
         endPhase,
+        plan,
       });
 
       const allCompleted = tasks.every(t => t.status === 'completed');

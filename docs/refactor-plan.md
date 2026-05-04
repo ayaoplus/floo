@@ -410,7 +410,9 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 | 3. Skill frontmatter | ✅ Done | 6 个 skill 加 frontmatter,`loadSkillWithMetadata` API 上线,老 `loadSkill` 向后兼容;commit `2d450ad` |
 | 4a. Executor 模块上线(plan-driven 入口 facade) | ✅ Done | `src/core/executor.ts` 提供 `runPlan` / `runPlanFromDisk`;commit `0188a47` |
 | 4b. dispatcher 退化 shim + 子模块化 + tiny/quick 模板 + `--mode` | ✅ Done | dispatcher.ts 1661 → 18 行 thin shim;状态机/飞轮/planner 拆分搬到 `executor/state-machine.ts` + `executor/batch.ts`;子模块拆分:io/artifacts/prompt/execute-step/verdict/planner/summary。`tiny.yaml` / `quick.yaml` + `templateToPhases()` + `floo run --mode tiny\|quick\|feature`;commits `bd15590`、`8bc56fa`、本次 |
-| 4c. PlanState-driven 状态机(用户编辑 yaml 真改变行为) | ⬜ Pending | runTask 内部从 `(task, startPhase)` 改为消费 PlanState;PHASE_ORDER 从 yaml 派生(目前仍硬编码常量) |
+| 4c. PlanState-driven runTask + plan-driven createAndRun (simple path) | ✅ Done | `executor/state.ts` 提供 RunState + planStepsToRunSteps;runTask 内部用 RunState 驱动;新 `runTaskFromSteps` 入口消费外部 step 列表;createAndRun 接受 `opts.plan` 在 simple path 上真消费 plan.steps;`floo run --mode tiny\|quick` 现在 plan-driven |
+| 4d. 复杂 path plan-driven(飞轮 + planner 拆分) | ⬜ Pending | createAndRun 在 discuss/designer/planner 起步上仍硬编码飞轮;Step 4d 改为消费 plan 中的 loop_with / defer_after 标记 |
+| 4e. PHASE_ORDER 从 feature.yaml 派生(消除硬编码常量) | ⬜ Pending | types.ts 的 PHASE_ORDER 改为从 templates/plans/feature.yaml 启动时加载;`makeStepsForPhaseRange` / `runTask` 老路径都跟随 |
 | 5. Runtimes 进 config | ⬜ Pending | |
 | 6. Plan-patch | ⬜ Pending | |
 | 7. UI 改造 | ⬜ Pending | |
