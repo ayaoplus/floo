@@ -34,6 +34,10 @@ export {
 // Adapter 实现
 export { ClaudeAdapter } from './adapters/claude.js';
 export { CodexAdapter } from './adapters/codex.js';
+export { GenericRuntimeAdapter } from './adapters/generic.js';
+
+// Runtime 注册表 (Step 5)
+export { loadAdapters, mergeRuntimes } from './runtimes.js';
 
 // Router
 export { routeTask } from './router.js';

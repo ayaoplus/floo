@@ -14,8 +14,7 @@ import {
   routeTask,
   loadTemplate,
   templateToPhases,
-  ClaudeAdapter,
-  CodexAdapter,
+  loadAdapters,
   DEFAULT_CONFIG,
   type Phase,
   type FlooConfig,
@@ -131,15 +130,15 @@ export const runCommand = new Command('run')
         concurrency: { ...DEFAULT_CONFIG.concurrency, ...userConfig.concurrency },
         session: { ...DEFAULT_CONFIG.session, ...userConfig.session },
         limits: { ...DEFAULT_CONFIG.limits, ...userConfig.limits },
+        // runtimes:用户 entry 整体覆盖默认 entry(由 loadAdapters / mergeRuntimes 完成),
+        // 这里只做 key 级浅合并即可
+        runtimes: { ...DEFAULT_CONFIG.runtimes, ...userConfig.runtimes },
         protected_files: userConfig.protected_files ?? DEFAULT_CONFIG.protected_files,
       };
     } catch { /* 使用默认配置 */ }
 
-    // 初始化 adapters
-    const adapters = {
-      claude: new ClaudeAdapter(),
-      codex: new CodexAdapter(),
-    };
+    // 初始化 adapters:从 config.runtimes 注册表加载,任意自定义 runtime 自动可用
+    const adapters = loadAdapters(config);
 
     console.log('开始执行...\n');
 

@@ -1,22 +1,15 @@
 /**
  * Codex CLI Adapter
- * 通过 codex CLI 启动 agent session，继承 BaseAdapter 处理 tmux 和 runner 逻辑
+ *
+ * Step 5 起退化为 GenericRuntimeAdapter 的 preset。详见 claude.ts 头注。
  */
 
-import { BaseAdapter } from './base.js';
-import type { Runtime, SpawnOptions } from '../types.js';
+import { GenericRuntimeAdapter } from './generic.js';
+import { DEFAULT_CONFIG } from '../types.js';
 
-/** 转义 shell 单引号：' → '\'' */
-function escapeShellSingleQuote(str: string): string {
-  return str.replace(/'/g, "'\\''");
-}
-
-export class CodexAdapter extends BaseAdapter {
-  runtime: Runtime = 'codex';
-
-  /** 构建 codex CLI 命令 */
-  protected buildAgentCommand(opts: SpawnOptions): string {
-    const escaped = escapeShellSingleQuote(opts.prompt);
-    return `codex exec --model ${opts.model} --dangerously-bypass-approvals-and-sandbox '${escaped}'`;
+export class CodexAdapter extends GenericRuntimeAdapter {
+  constructor() {
+    const cfg = DEFAULT_CONFIG.runtimes!.codex;
+    super('codex', cfg);
   }
 }

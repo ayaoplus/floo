@@ -10,8 +10,17 @@
 /** 任务执行阶段 */
 export type Phase = 'discuss' | 'designer' | 'planner' | 'coder' | 'reviewer' | 'tester';
 
-/** Agent 运行时 */
-export type Runtime = 'claude' | 'codex';
+/**
+ * Agent 运行时名。
+ *
+ * Step 5 起,Runtime 不再是封闭联合,任何 `floo.config.json#runtimes` 里声明
+ * 的 key 都是合法 runtime。`claude` / `codex` 内置在 DEFAULT_CONFIG,IDE
+ * 仍然给自动补全;用户配 `gemini` / `qwen` 等只需在 runtimes 段加一条,
+ * 不再写 TypeScript 子类。
+ *
+ * `(string & {})` 是 TS 的"扩展联合"小技巧,保留字面量提示同时允许任意字符串。
+ */
+export type Runtime = 'claude' | 'codex' | (string & {});
 
 /** 任务状态 */
 export type TaskStatus =
@@ -40,6 +49,26 @@ export interface RoleBinding {
   model: string;
 }
 
+/**
+ * 单个 runtime 的 CLI 调用配置 (Step 5)。
+ *
+ * args 中支持的占位符(运行时由 GenericRuntimeAdapter 替换 + shell-quote):
+ *   ${model}        — RoleBinding.model
+ *   ${prompt}       — agent 入参 prompt(已 frontmatter 渲染)
+ *   ${task_id}      — 当前 task ID
+ *   ${phase}        — 当前 phase 名
+ *   ${cwd}          — 项目根
+ *   ${session_name} — tmux session 名
+ *
+ * 不支持嵌套或复杂逻辑;需要复杂行为请直接写自定义 adapter 子类(BaseAdapter)。
+ */
+export interface RuntimeConfig {
+  /** CLI 可执行文件名(如 'claude'、'codex'、'gemini'),通过 PATH 查找 */
+  command: string;
+  /** 参数列表(每项独立 shell-quote);用占位符引用 spawn 时的 SpawnOptions 字段 */
+  args: string[];
+}
+
 /** floo.config.json 的完整结构 */
 export interface FlooConfig {
   roles: Record<Phase, RoleBinding>;
@@ -59,6 +88,11 @@ export interface FlooConfig {
     max_test_rounds: number;
     max_discuss_rounds: number;
   };
+  /**
+   * Runtime 注册表 (Step 5)。key = Runtime 名(如 'claude'),value = CLI 调用模板。
+   * 老配置不带这段时,运行时合并 DEFAULT_CONFIG.runtimes 兜底。
+   */
+  runtimes?: Record<string, RuntimeConfig>;
   protected_files: string[];
 }
 
@@ -294,6 +328,18 @@ export const DEFAULT_CONFIG: FlooConfig = {
     max_review_rounds: 2,
     max_test_rounds: 2,
     max_discuss_rounds: 2,
+  },
+  // Step 5:内置 claude / codex 两个 runtime,与原 ClaudeAdapter / CodexAdapter
+  // 的 buildAgentCommand 等价。用户在 floo.config.json 加新 entry 即可注册自定义 runtime。
+  runtimes: {
+    claude: {
+      command: 'claude',
+      args: ['--model', '${model}', '--dangerously-skip-permissions', '-p', '${prompt}'],
+    },
+    codex: {
+      command: 'codex',
+      args: ['exec', '--model', '${model}', '--dangerously-bypass-approvals-and-sandbox', '${prompt}'],
+    },
   },
   protected_files: ['.env', 'floo.config.json', 'CLAUDE.md', 'AGENTS.md'],
 };

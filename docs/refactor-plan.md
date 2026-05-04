@@ -497,6 +497,8 @@ flowchart TB
 
 ## Step 5: Runtimes 进 Config (adapter 通用化)
 
+> **当前进度(2026-05)**:✅ Done。`runtimes` 段 + `GenericRuntimeAdapter` + `loadAdapters` 全部落地;`ClaudeAdapter` / `CodexAdapter` 退化为 GenericRuntimeAdapter 的 preset(仍 export 兼容外部消费者);commands/run.ts 与 cancel.ts 改用 `loadAdapters(config)`,自定义 runtime 即配即用,无需 TS 子类。`stdout/stderr 解析策略`(原计划风险点)在当前实现里**没引入**:floo 通过 exit artifact 文件 + tmux wait-for 通信,不依赖 stdout 解析,所以 Generic adapter 不需要每个 CLI 写一份输出 parser。
+
 ### 目标
 
 `floo.config.json` 增加 `runtimes` 段。新写一个 `GenericRuntimeAdapter`,根据配置启动 tmux + 执行 CLI + 解析输出。`adapters/{claude,codex}.ts` 退化为兜底,直至验证通用 adapter 稳定。
@@ -649,7 +651,7 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 | 4c. PlanState-driven runTask + plan-driven createAndRun (simple path) | ✅ Done | `executor/state.ts` 提供 RunState + planStepsToRunSteps;runTask 内部用 RunState 驱动;新 `runTaskFromSteps` 入口消费外部 step 列表;createAndRun 接受 `opts.plan` 在 simple path 上真消费 plan.steps;`floo run --mode tiny\|quick` 现在 plan-driven |
 | 4d. 复杂 path plan-driven(飞轮 + planner 拆分) | ✅ Done | `runBatchEntry` 改读 plan 拓扑(`planHasComplexCapability` / `planHasDiscussDesignerLoop` / `planHasPlanner` / `planHasPlannerExpansion`)决定 simple/wheel/planner/expansion 分支;不传 plan 时沿用老 startPhase 推断,行为零回归 |
 | 4e. PHASE_ORDER 从 feature.yaml 派生(消除硬编码常量) | ✅ Done | 新模块 `src/core/phase-order.ts` 启动期同步读 `templates/plans/feature.yaml` 派生;types.ts 改为 re-export 维持 import 兼容;读取/解析失败时 fallback 硬编码 + console.warn |
-| 5. Runtimes 进 config | ⬜ Pending | |
+| 5. Runtimes 进 config | ✅ Done | `floo.config.json#runtimes` 注册 CLI 命令模板;`GenericRuntimeAdapter` 配置驱动;`ClaudeAdapter` / `CodexAdapter` 退化为 GenericRuntimeAdapter 的 preset;commands/run.ts、cancel.ts 切到 `loadAdapters(config)`;`Runtime` 类型从封闭联合放开为 `'claude' \| 'codex' \| (string & {})` |
 | 6. Plan-patch | ⬜ Pending | |
 | 7. UI 改造 | ⬜ Pending | |
 | 8. --orchestrate | ⬜ Pending | opt-in 高级模式 |

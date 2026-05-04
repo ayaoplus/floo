@@ -7,8 +7,7 @@ import { Command } from 'commander';
 import { join } from 'node:path';
 import { readFile } from 'node:fs/promises';
 import {
-  ClaudeAdapter,
-  CodexAdapter,
+  loadAdapters,
   getTask,
   listBatches,
   cancelTask,
@@ -60,14 +59,19 @@ export const cancelCommand = new Command('cancel')
         concurrency: { ...DEFAULT_CONFIG.concurrency, ...userConfig.concurrency },
         session: { ...DEFAULT_CONFIG.session, ...userConfig.session },
         limits: { ...DEFAULT_CONFIG.limits, ...userConfig.limits },
+        runtimes: { ...DEFAULT_CONFIG.runtimes, ...userConfig.runtimes },
         protected_files: userConfig.protected_files ?? DEFAULT_CONFIG.protected_files,
       };
     } catch { /* 使用默认配置 */ }
 
     const roleBinding = task.role_overrides?.[task.current_phase] ?? config.roles[task.current_phase];
-    const adapter = roleBinding.runtime === 'codex'
-      ? new CodexAdapter()
-      : new ClaudeAdapter();
+    // 从注册表取 adapter:支持任意用户自定义 runtime
+    const adapters = loadAdapters(config);
+    const adapter = adapters[roleBinding.runtime];
+    if (!adapter) {
+      console.error(`错误：runtime "${roleBinding.runtime}" 未在 floo.config.json#runtimes 注册`);
+      process.exit(1);
+    }
 
     console.log(`取消任务: ${taskId} @ ${task.current_phase}（批次: ${batchId}）`);
     console.log(`使用 adapter: ${roleBinding.runtime}`);
