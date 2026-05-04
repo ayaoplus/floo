@@ -5,14 +5,12 @@
 
 import { Command } from 'commander';
 import { join } from 'node:path';
-import { readFile } from 'node:fs/promises';
 import {
   loadAdapters,
   getTask,
   listBatches,
   cancelTask,
-  DEFAULT_CONFIG,
-  type FlooConfig,
+  loadFlooConfig,
 } from '../core/index.js';
 
 export const cancelCommand = new Command('cancel')
@@ -49,20 +47,14 @@ export const cancelCommand = new Command('cancel')
       process.exit(1);
     }
 
-    // 加载配置（深度合并）
-    let config: FlooConfig = DEFAULT_CONFIG;
+    // 加载配置:文件不存在用默认,坏 config fail-fast
+    let config;
     try {
-      const configContent = await readFile(join(cwd, 'floo.config.json'), 'utf-8');
-      const userConfig = JSON.parse(configContent);
-      config = {
-        roles: { ...DEFAULT_CONFIG.roles, ...userConfig.roles },
-        concurrency: { ...DEFAULT_CONFIG.concurrency, ...userConfig.concurrency },
-        session: { ...DEFAULT_CONFIG.session, ...userConfig.session },
-        limits: { ...DEFAULT_CONFIG.limits, ...userConfig.limits },
-        runtimes: { ...DEFAULT_CONFIG.runtimes, ...userConfig.runtimes },
-        protected_files: userConfig.protected_files ?? DEFAULT_CONFIG.protected_files,
-      };
-    } catch { /* 使用默认配置 */ }
+      config = loadFlooConfig(cwd);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
 
     const roleBinding = task.role_overrides?.[task.current_phase] ?? config.roles[task.current_phase];
     // 从注册表取 adapter:支持任意用户自定义 runtime

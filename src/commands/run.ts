@@ -6,7 +6,7 @@
 import { Command } from 'commander';
 import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
-import { readFile, mkdir } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { openSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -15,9 +15,8 @@ import {
   loadTemplate,
   templateToPhases,
   loadAdapters,
-  DEFAULT_CONFIG,
+  loadFlooConfig,
   type Phase,
-  type FlooConfig,
 } from '../core/index.js';
 
 const exec = promisify(execFile);
@@ -120,22 +119,15 @@ export const runCommand = new Command('run')
     }
     console.log('');
 
-    // 加载配置（深度合并，用户只需覆盖想改的字段）
-    let config: FlooConfig = DEFAULT_CONFIG;
+    // 加载配置：文件不存在用默认,坏 config 直接 fail-fast(避免静默回退导致用户
+    // 不知情下用 DEFAULT runtimes / protected_files 跑任务)
+    let config;
     try {
-      const configContent = await readFile(join(cwd, 'floo.config.json'), 'utf-8');
-      const userConfig = JSON.parse(configContent);
-      config = {
-        roles: { ...DEFAULT_CONFIG.roles, ...userConfig.roles },
-        concurrency: { ...DEFAULT_CONFIG.concurrency, ...userConfig.concurrency },
-        session: { ...DEFAULT_CONFIG.session, ...userConfig.session },
-        limits: { ...DEFAULT_CONFIG.limits, ...userConfig.limits },
-        // runtimes:用户 entry 整体覆盖默认 entry(由 loadAdapters / mergeRuntimes 完成),
-        // 这里只做 key 级浅合并即可
-        runtimes: { ...DEFAULT_CONFIG.runtimes, ...userConfig.runtimes },
-        protected_files: userConfig.protected_files ?? DEFAULT_CONFIG.protected_files,
-      };
-    } catch { /* 使用默认配置 */ }
+      config = loadFlooConfig(cwd);
+    } catch (err) {
+      console.error(err instanceof Error ? err.message : String(err));
+      process.exit(1);
+    }
 
     // 初始化 adapters:从 config.runtimes 注册表加载,任意自定义 runtime 自动可用
     const adapters = loadAdapters(config);

@@ -39,6 +39,9 @@ export { GenericRuntimeAdapter } from './adapters/generic.js';
 // Runtime 注册表 (Step 5)
 export { loadAdapters, mergeRuntimes } from './runtimes.js';
 
+// Config 加载 (Step 5/6 review fix #6:坏 config fail-fast)
+export { loadFlooConfig } from './config-loader.js';
+
 // Router
 export { routeTask } from './router.js';
 
@@ -91,6 +94,7 @@ export { addLesson, extractLesson, listLessons, distillRules, type Lesson, type 
 // Plan 拓扑查询 (Step 4d: 让 batch.runBatchEntry 按 plan 决定分支)
 export {
   synthesizeInitialPlan,
+  materializeTemplate,
   writePlan,
   readPlan,
   planYamlPath,
