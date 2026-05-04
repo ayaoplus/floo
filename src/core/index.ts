@@ -112,3 +112,16 @@ export {
 
 // Phase order (Step 4e: 从 feature.yaml 派生)
 export { derivePhaseOrder, loadFeaturePhaseOrder } from './phase-order.js';
+
+// Plan-patch (Step 6: append-only 演化 ledger)
+export {
+  applyPatch,
+  writePatch,
+  readPatches,
+  validatePatch,
+  patchesDir,
+  patchPath,
+  type PlanPatch,
+  type PlanPatchKind,
+  type ApplyPatchResult,
+} from './plan-patch.js';

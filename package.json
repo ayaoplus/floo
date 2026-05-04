@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "build": "tsc",
-    "test": "npm run build && tsx test/core.test.ts && tsx test/dispatcher.test.ts && tsx test/plan.test.ts && tsx test/skill-loader.test.ts && tsx test/executor.test.ts && tsx test/runtimes.test.ts",
+    "test": "npm run build && tsx test/core.test.ts && tsx test/dispatcher.test.ts && tsx test/plan.test.ts && tsx test/skill-loader.test.ts && tsx test/executor.test.ts && tsx test/runtimes.test.ts && tsx test/plan-patch.test.ts",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
