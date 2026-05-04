@@ -174,6 +174,26 @@ console.log('\n=== 2. applyPatch: 校验失败 ===');
     const msg = err instanceof Error ? err.message : String(err);
     assert(msg.includes('append-steps'), '错误信息提示只支持 append-steps');
   }
+
+  // 2g. (codex review #4) runtime/model 缺失且 plan 中找不到同 capability step → 抛错
+  // 防止 plan-patch ledger 写入误导的 runtime/model 值
+  try {
+    applyPatch(plan, makePatch({
+      append_steps: [{ id: 'discuss-1', capability: 'discuss' }], // plan 是 coder 起步,无 discuss step
+    }));
+    assert(false, '同 capability step 不存在 + 缺 runtime → 应抛错');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    assert(msg.includes('runtime/model'), '错误信息说明缺 runtime/model');
+    assert(msg.includes('discuss'), '错误信息含 capability 名');
+  }
+
+  // 2h. ts.runtime/model 显式提供 → 不报错(emitRetryPatch 走的就是这条)
+  const explicit = applyPatch(plan, makePatch({
+    append_steps: [{ id: 'discuss-1', capability: 'discuss', runtime: 'claude', model: 'opus' }],
+  }));
+  assert(explicit.appended[0].runtime === 'claude', '显式 runtime 被采用');
+  assert(explicit.appended[0].model === 'opus', '显式 model 被采用');
 }
 
 // ============================================================

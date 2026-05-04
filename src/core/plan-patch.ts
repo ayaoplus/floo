@@ -116,19 +116,33 @@ export function applyPatch(plan: PlanYaml, patch: PlanPatch): ApplyPatchResult {
       }
     }
 
-    // 把 template step 物化成 PlanStep(用占位的 runtime/model,留给上层调用方按 capability 重新填)
-    // 这里不接触 RoleBinding,因为 patch 模块是纯数据,不依赖 config
+    // 物化 PlanStep。runtime/model 解析顺序:
+    //   1. patch 显式声明 (ts.runtime / ts.model)
+    //   2. plan 中相同 capability 的最近 step 的值(避免把 reviewer 的 runtime
+    //      错填成 coder 的——这是 codex review #4 修复)
+    //   3. 仍找不到 → 抛错,强制 caller 显式提供
+    // 不接触 config.roles,因为 patch 模块要保持 config-agnostic。
+    const inferredRuntime = ts.runtime
+      ?? plan.steps.find(s => s.capability === ts.capability)?.runtime;
+    const inferredModel = ts.model
+      ?? plan.steps.find(s => s.capability === ts.capability)?.model;
+    if (!inferredRuntime || !inferredModel) {
+      throw new Error(
+        `applyPatch: append_steps[${i}] (id=${ts.id}, cap=${ts.capability}) ` +
+          `缺 runtime/model 且 plan 中找不到同 capability step 可借,patch 必须显式提供`,
+      );
+    }
     const ps: PlanStep = {
       id: ts.id,
       capability: ts.capability,
-      runtime: (ts.runtime ?? plan.steps[0]?.runtime ?? 'claude') as Runtime,
-      model: ts.model ?? plan.steps[0]?.model ?? 'sonnet',
+      runtime: inferredRuntime as Runtime,
+      model: inferredModel,
       depends_on: ts.depends_on ?? [],
       // scope 字段:'task' 透传需要 task.scope,plan 模块不知道,这里仅保留字面 scope。
       // 调用方(executor)需要在 apply 之前自己把 'task' 替换成实际 scope。
       scope: Array.isArray(ts.scope) ? ts.scope : [],
       status: ts.status ?? 'pending',
-      ...(ts.runtime || ts.model ? {} : { notes: 'plan-patch:appended (runtime/model 继承默认)' }),
+      ...(ts.runtime || ts.model ? {} : { notes: 'plan-patch:appended (runtime/model 借自同 capability step)' }),
     };
     appended.push(ps);
     existingIds.add(ts.id); // 后续 patch 内引用本 step 的依赖也算合法
