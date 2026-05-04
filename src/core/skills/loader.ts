@@ -26,8 +26,10 @@ export interface SkillFile {
 }
 
 const VALID_PHASES = new Set<Phase>(['discuss', 'designer', 'planner', 'coder', 'reviewer', 'tester']);
-const VALID_RUNTIMES = new Set<Runtime>(['claude', 'codex']);
 const VALID_POLICIES = new Set<WritePolicy>(['scope', 'artifacts_only', 'readonly']);
+// Step 5 起 Runtime 是开放联合(任何 floo.config.json#runtimes 注册的 key 都合法),
+// 所以这里不再 hardcode 校验 default_runtime。frontmatter 接受任意非空字符串,
+// 运行时的"runtime 是否注册"由 commands 层 loadAdapters → 找不到 adapter 时报错兜底。
 
 /**
  * 老 API:加载 skill 模板文件并替换变量
@@ -112,9 +114,9 @@ export function validateCapabilityMetadata(parsed: unknown, skillName: string): 
   if (!Array.isArray(obj.outputs) || obj.outputs.length === 0 || !obj.outputs.every(o => typeof o === 'string')) {
     throw new Error(`skill ${skillName}: frontmatter.outputs 必须是非空 string 数组`);
   }
-  if (typeof obj.default_runtime !== 'string' || !VALID_RUNTIMES.has(obj.default_runtime as Runtime)) {
+  if (typeof obj.default_runtime !== 'string' || obj.default_runtime.length === 0) {
     throw new Error(
-      `skill ${skillName}: frontmatter.default_runtime "${String(obj.default_runtime)}" 非法 (允许:${[...VALID_RUNTIMES].join('/')})`,
+      `skill ${skillName}: frontmatter.default_runtime 缺失或非字符串`,
     );
   }
   if (typeof obj.default_model !== 'string' || obj.default_model.length === 0) {

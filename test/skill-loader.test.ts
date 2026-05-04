@@ -137,12 +137,15 @@ expectThrow(
   'default_runtime',
   '缺 default_runtime',
 );
-expectThrow(
-  { name: 'coder', write_policy: 'scope', outputs: ['commits'], default_runtime: 'gemini' },
-  'x',
-  'default_runtime',
-  'default_runtime 非法',
-);
+// Step 5 起 Runtime 是开放联合,自定义 runtime(如 gemini)在 frontmatter 里被接受。
+// 运行时由 commands 层 loadAdapters 兜:若该 runtime 未在 floo.config.json 注册,spawn 时报错。
+{
+  const meta = validateCapabilityMetadata(
+    { name: 'coder', write_policy: 'scope', outputs: ['commits'], default_runtime: 'gemini', default_model: 'pro' },
+    'x',
+  );
+  assert(meta.default_runtime === 'gemini', 'frontmatter 接受自定义 runtime "gemini"(Step 5 修复)');
+}
 expectThrow(
   { name: 'coder', write_policy: 'scope', outputs: ['commits'], default_runtime: 'claude' },
   'x',
