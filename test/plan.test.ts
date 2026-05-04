@@ -378,16 +378,46 @@ console.log('\n=== 8c. templateToPhases: feature 完整流程 endPhase=undefined
 }
 
 // ============================================================
-// 9. Step 2 不影响 dispatcher 行为(放在这里只做提示性 assert)
+// 9. Step 4e: PHASE_ORDER 由 feature.yaml 派生
 // ============================================================
 
-console.log('\n=== 9. Step 2 不消费模板:PHASE_ORDER 仍是硬编码 ===');
+console.log('\n=== 9. Step 4e: PHASE_ORDER 来源是 feature.yaml ===');
 
 {
-  // PHASE_ORDER 来源在 types.ts,Step 2 没改
+  // 模块级 PHASE_ORDER 仍可从 types.ts re-export 拿到,与默认 feature.yaml 一致
   const { PHASE_ORDER } = await import('../src/core/index.js');
-  assert(PHASE_ORDER.length === 6, 'PHASE_ORDER 仍是硬编码 6 阶段');
-  assert(PHASE_ORDER[0] === 'discuss', 'PHASE_ORDER[0] 不受 feature.yaml 影响');
+  assert(PHASE_ORDER.length === 6, '默认 PHASE_ORDER 派生出 6 阶段');
+  assert(PHASE_ORDER[0] === 'discuss', '默认 PHASE_ORDER[0] = discuss(与 feature.yaml 一致)');
+  assert(PHASE_ORDER[5] === 'tester', '默认 PHASE_ORDER[5] = tester');
+
+  // derivePhaseOrder 纯函数:按 capability 出现顺序去重(loop_with 回边不影响)
+  const { derivePhaseOrder, loadFeaturePhaseOrder } = await import('../src/core/phase-order.js');
+  const customOrder = derivePhaseOrder({
+    steps: [
+      { capability: 'planner' },
+      { capability: 'coder' },
+      { capability: 'planner' }, // 重复出现应被去重
+      { capability: 'reviewer' },
+    ],
+  });
+  assert(customOrder.length === 3, 'derivePhaseOrder 去重后剩 3 个');
+  assert(customOrder[0] === 'planner' && customOrder[1] === 'coder' && customOrder[2] === 'reviewer',
+    'derivePhaseOrder 保留首次出现顺序');
+
+  // loadFeaturePhaseOrder 走自定义路径 + 验证派生
+  const fixDir = join(tmpdir(), `floo-phase-fix-${Date.now()}`);
+  await mkdir(fixDir, { recursive: true });
+  await writeFile(join(fixDir, 'feature.yaml'),
+    'schema_version: 1\nname: feature\nsteps:\n  - id: a\n    capability: coder\n  - id: b\n    capability: tester\n');
+  const fixOrder = loadFeaturePhaseOrder(join(fixDir, 'feature.yaml'));
+  assert(fixOrder.length === 2, 'fixture feature.yaml 派生 2 阶段');
+  assert(fixOrder[0] === 'coder' && fixOrder[1] === 'tester', 'fixture 派生顺序 = coder→tester');
+  await rm(fixDir, { recursive: true, force: true });
+
+  // fallback 路径:文件不存在时仍返回 6 阶段默认序
+  const fallback = loadFeaturePhaseOrder(join(tmpdir(), 'floo-nonexistent', 'feature.yaml'));
+  assert(fallback.length === 6, 'feature.yaml 不存在时 fallback 返回 6 阶段');
+  assert(fallback[0] === 'discuss', 'fallback[0] 仍是 discuss');
 }
 
 // ============================================================

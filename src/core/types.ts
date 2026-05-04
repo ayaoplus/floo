@@ -246,8 +246,14 @@ export interface AgentAdapter {
 // Dispatcher
 // ============================================================
 
-/** 状态机的阶段流转顺序 */
-export const PHASE_ORDER: Phase[] = ['discuss', 'designer', 'planner', 'coder', 'reviewer', 'tester'];
+/**
+ * 状态机的阶段流转顺序。
+ *
+ * Step 4e 起:此值由 `phase-order.ts` 从 `templates/plans/feature.yaml` 派生,
+ * 用户编辑 feature.yaml 顺序后此处自动跟随。types.ts 为兼容老 import 路径
+ * 仍 re-export 同一份引用。
+ */
+export { PHASE_ORDER } from './phase-order.js';
 
 /** 最大重试次数 */
 export const MAX_RETRIES = 3;
