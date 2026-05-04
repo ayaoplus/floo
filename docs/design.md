@@ -47,10 +47,13 @@ inputs:                      # 这个 capability 期望读到的上游产物
 (prompt body...)
 ```
 
-`write_policy` 由 executor 在运行时强制执行:
-- `scope`:只能写声明的 file scope 内的文件,会跑 git wrapper 拦截 out-of-scope 写入
-- `artifacts_only`:只能写本任务目录下的 markdown 产物(context.md / design.md / plan.md 等)
-- `readonly`:只能读,任何 git 改动会被拒绝
+`write_policy` 由 executor **在 step 完成后**校验(事后检测,不是事前拦截):
+
+- `scope`:step 完成后 executor 比对 `files_changed` 与声明的 file scope。越界文件 → step 标记为 `failed-out-of-scope`,越界变更 quarantine(写入 `.floo/.../quarantine/<stepId>.diff`)而不直接进 commit。
+- `artifacts_only`:只允许写本任务目录下的 markdown 产物(context.md / design.md / plan.md 等)。检测到 git diff 中含其他文件 → fail。
+- `readonly`:step 完成后检测 git tree 是否变更。任何变更 → fail + quarantine。
+
+> **当前实现说明**:`adapters/base.ts` 里的 git wrapper 仅做并发 git 写串行化(mkdir 锁),**没有**文件系统沙箱能力。"事前拦截"会留到未来如果真的需要文件系统隔离时再做(候选方案:bubblewrap / Linux namespace / macOS sandbox-exec)。在那之前,`write_policy` 是事后纪律,不是事前防护——自律的 agent 会守约,作恶的 agent 能绕过,但你能在 ledger 里看到证据。
 
 **capability 注册中心 = `ls skills/`**。新增一个 capability = 加一份 `skills/<name>.md`。不需要再维护一份 `capabilities.yaml`(避免双事实源)。
 
@@ -291,12 +294,16 @@ executor 启动一个 step 的条件:
 
 ## Cancellation
 
-`floo cancel <batchId>` / `floo cancel <stepId>`:
+CLI 沿用现状:`floo cancel <taskId> [--batch <batchId>]`。在 plan-driven 模型下,`taskId` 指向 plan.yaml 中的某个 step(术语统一: 一个 step 在 CLI 和外部 API 里仍叫 task,在 plan 内部 yaml 节点里叫 step,两者一一对应)。
+
+执行语义:
 
 - 找到运行中的 tmux session,kill
 - 写一条 `cancelled` 状态的 run 记录
-- 标记 step 为 cancelled,不影响其他 step
+- 标记该 step 为 cancelled,不影响其他 step
 - 不做全局 git reset
+
+> **CLI 兼容性约定**:重构期间 cancel / status / monitor 等 CLI 接口签名不变,以保持与 OpenClaw 等外部集成的向后兼容。如果未来需要新增 batch 级别取消,会以**新增标志**(如 `--all-in-batch`)的方式扩展,而不是改命令参数位置。
 
 ## Runtime Data Layout
 

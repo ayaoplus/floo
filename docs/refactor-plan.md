@@ -63,41 +63,56 @@
 
 ---
 
-## Step 2: PHASE_ORDER → templates/plans/feature.yaml
+## Step 2: 把 PHASE_ORDER 的事实源从代码迁到 yaml(行为不变)
 
 ### 目标
 
-把 `PHASE_ORDER` 常量删掉,改成读取 `templates/plans/feature.yaml`。dispatcher 仍然按这份模板的 step 顺序跑,但顺序的"事实源"从代码移到了配置文件。同时建立 `templates/plans/` 目录,放入第一份模板。
+`PHASE_ORDER` 常量**仍然存在**(为兼容现有 export 和测试),但它的初始值不再写死,而是在模块加载时从 `templates/plans/feature.yaml` 派生:
+
+```ts
+// 旧
+export const PHASE_ORDER: Phase[] = ['discuss', 'designer', ..., 'tester'];
+
+// 新
+export const PHASE_ORDER: Phase[] = loadTemplate('feature.yaml').steps.map(s => s.capability) as Phase[];
+```
+
+dispatcher 内部状态机不变,仍消费 `PHASE_ORDER`。**但 PHASE_ORDER 的"权威来源"已经搬到 yaml**——重启进程时,用户对 `feature.yaml` 的编辑会生效。
+
+这是一个保守的"事实源迁移",不是"换一套执行模型"。后者留到 Step 4。
 
 ### 输入
 
-- Step 1 完成
-- `templates/plans/feature.yaml`(本步新增)
+- Step 1 完成(plan.yaml 落盘的数据模型已稳定)
 
 ### 输出
 
-- `templates/plans/feature.yaml`:与当前 6 阶段等价的执行图模板
+- `templates/plans/feature.yaml`:与当前 6 阶段语义等价
 - `templates/plans/tiny.yaml`:仅 coder
 - `templates/plans/quick.yaml`:coder → reviewer
-- `src/core/plan.ts` 加 `loadTemplate(name)` 函数
-- router 改成"选模板",不直接选 phase
-- `dispatcher.ts` 改成读模板生成 plan.yaml,但仍按内部状态机执行
+- `src/core/plan.ts` 加 `loadTemplate(name)`(同步 IO,模块加载时即用)
+- router 改成"先选模板,再从模板的 steps 里取 startPhase",但内部仍走 PHASE_ORDER 索引
 
 ### 不做
 
-- dispatcher 仍不读 plan.yaml 执行(下一步才换)
-- 不加 frontmatter
+- 不删 `PHASE_ORDER` export(测试和 dispatcher 都依赖)
+- dispatcher 不读 plan.yaml 执行(Step 4 才换)
+- 不加 frontmatter(Step 3)
 - 不动 runtime adapter
 
 ### 验收
 
-- 用户可手编辑 `templates/plans/feature.yaml` 调整步骤,Floo 重新运行后行为变化
-- `floo run --mode tiny|quick|feature` 三种模板都能跑通
-- 现有测试需要小幅调整(从期望 `PHASE_ORDER` → 期望 plan.yaml 内容),但语义保持
+- 用户编辑 `templates/plans/feature.yaml` 调整 step 顺序,**重启** Floo 后,`PHASE_ORDER` 反映新顺序,dispatcher 走新顺序
+- `floo run --mode tiny|quick|feature` 三种模板都能跑通(实质上是改变启动时加载哪份 yaml,然后让 PHASE_ORDER 对应不同序列;`tiny` / `quick` 路径下 dispatcher 在跑到不存在的 phase 时跳过——具体跳过逻辑在 Step 1 的 plan.yaml 落盘里就要预演过)
+- 现有测试 100% 通过(因为 `PHASE_ORDER` export 和值都保持等价)
 
 ### 风险
 
-中。这是第一次让外部配置影响行为,要确保模板加载失败时有清晰的报错。
+中。三个具体风险:
+
+1. **模板加载失败的 fail-fast**:模块顶层加载 yaml 失败要打印清晰错误并 exit 1,不能让 PHASE_ORDER 变成 undefined。
+2. **三个 mode 的语义对齐**:`tiny` 没有 designer 等 phase,但 dispatcher 状态机仍按 PHASE_ORDER 推进——需要在 dispatcher 入口前根据 mode 截断 startIdx/endIdx,而不是动 PHASE_ORDER 本身。
+3. **测试稳定性**:`test/core.test.ts` 第 57 行 `assert(PHASE_ORDER.length === 6)` 是基于 `feature.yaml` 模板的硬断言。如果用户改了 yaml 测试就挂——这个测试需要改成"PHASE_ORDER 反映 feature.yaml"而不是"长度恒等于 6"。这是 Step 2 唯一不可避免的测试改动。
 
 ---
 
@@ -161,39 +176,47 @@
 
 - `src/core/executor.ts`:DAG 拓扑调度循环
 - `src/core/scope.ts`:沿用,接口微调以匹配 plan 节点
-- `dispatcher.ts`:删除或瘦身为 thin wrapper
-- 现有测试通过 **适配层** 继续跑(见下方"测试迁移策略")
+- `src/core/dispatcher.ts`:**保留为 compatibility shim**(不删),内部委托 executor
+- 现有测试**不改**继续通过
 
-### 测试迁移策略 (关键)
+### 测试迁移策略 (源码 shim 而不是 test helper)
 
-旧 `test/dispatcher.test.ts` 覆盖了:
-- 路由
-- scope 冲突
-- review/test 循环
-- retry 用尽
-- scan/skip 分级
-- 多任务调度
-- `head_after` 追踪
+事实:旧 `test/dispatcher.test.ts` 和 `test/core.test.ts` 直接 import 了:
+- `PHASE_ORDER` from `src/core/types.ts`(`test/core.test.ts:18`)
+- `runTask, createAndRun, type DispatcherOptions` from `src/core/dispatcher.ts`(`test/dispatcher.test.ts:11`)
 
-**这些是当前实现的契约**。重构必须保持语义不变。具体做法:
+加 `test/helpers/dispatcher-shim.ts` **救不了**这些直接 import。正确做法是**在源码层保留兼容 export**:
 
-1. **不要删旧测试**。一行不动。
-2. 写一个 `test/helpers/dispatcher-shim.ts`:接受旧测试给的 phase 序列输入,转换成等价的 plan.yaml,喂给 executor。
-3. 跑旧测试 → executor 必须 100% 通过。
-4. 全过之后,才允许删 `dispatcher.ts`。
-5. 之后再写 `test/executor.test.ts` 用 plan.yaml 直接表达测试场景,逐步替换旧测试。
+1. **`PHASE_ORDER` 保留**:Step 2 已经把它的事实源迁到 yaml,Step 4 保持这个迁移结果不变。
+2. **`runTask` 保留为 thin wrapper**:
+   ```ts
+   export async function runTask(task, startPhase, opts) {
+     const plan = synthesizeSinglePlan(task, startPhase, opts);
+     const result = await executor.run(plan, opts);
+     return adaptToLegacyResult(result);  // 把 executor 的输出格式翻译回旧契约
+   }
+   ```
+3. **`createAndRun` 同理**:内部转 plan + 调 executor,但 export 签名和返回值结构不变。
+4. **`DispatcherOptions` 类型保留**:可以是 `ExecutorOptions` 的别名或子集。
+5. 旧测试一行不改,`npm test` 必须 100% 过。
+6. 全过且观察期(1-2 周本机使用)无回归后,**新写** `test/executor.test.ts` 直接覆盖 plan-driven 路径。
+7. 当 executor 测试覆盖等价于旧测试时,才允许把旧测试中"过时的 phase 概念"删掉,但 shim 本身可以保留更久,作为外部消费者(OpenClaw 等)的稳定接口。
+
+**关键约束**:Step 4 不删 `dispatcher.ts`,只是把内部实现换成委托给 executor。"删除 dispatcher" 这件事推迟到测试和外部消费者都迁移完之后,可能是 Step 7 之后的清理工作。
 
 ### 不做
 
 - 不引入 plan-patch(下一步才做,本步 plan 是静态的)
 - 不改 runtime adapter
 - 不改 UI
+- 不删 `dispatcher.ts`(只换内部实现)
+- 不删 `runTask` / `createAndRun` / `PHASE_ORDER` 任何 export
 
 ### 验收
 
-- 旧测试全过
+- 旧测试 100% 通过,**且 import 行不动**
 - 用户跑 `floo run` 行为与重构前完全一致
-- `dispatcher.ts` 不再包含 `PHASE_ORDER` 常量或硬编码状态推进
+- `src/core/dispatcher.ts` 内部不再包含 phase 状态推进逻辑,改为构造 plan + 调用 executor
 
 ### 风险
 
@@ -202,6 +225,7 @@
 - 拉一个独立分支,跑通再合并
 - 落地前先把 Step 1-3 用一段时间,确保 plan.yaml 数据模型稳定
 - 落地后留 1-2 周观察期再做 Step 5
+- 把 `runTask` / `createAndRun` 的输出契约**写成断言加进新 executor 测试**,防止之后的重构悄悄破坏外部消费者
 
 ---
 
@@ -351,10 +375,10 @@ Web UI 围绕 plan DAG 展示。每个节点点进去看 run 详情(prompt / log
 
 | Step | 状态 | 备注 |
 |------|------|------|
-| 1. plan.yaml 落盘 | ⬜ Pending | |
-| 2. PHASE_ORDER → feature.yaml | ⬜ Pending | |
+| 1. plan.yaml 落盘(只读镜像) | ⬜ Pending | |
+| 2. PHASE_ORDER 事实源迁 yaml(行为不变) | ⬜ Pending | |
 | 3. Skill frontmatter | ⬜ Pending | Step 4 前置 |
-| 4. Executor 替换 dispatcher | ⬜ Pending | **核心步骤,需独立分支** |
+| 4. Executor 内化(dispatcher 退化为 shim) | ⬜ Pending | **核心步骤,需独立分支** |
 | 5. Runtimes 进 config | ⬜ Pending | |
 | 6. Plan-patch | ⬜ Pending | |
 | 7. UI 改造 | ⬜ Pending | |
